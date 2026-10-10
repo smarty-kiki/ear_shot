@@ -32,8 +32,8 @@ for arg in "$@"; do
   case "$arg" in
     --universal) UNIVERSAL=1 ;;
     --publish)   PUBLISH=1 ;;
-    -h|--help)   sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数：$arg（试试 --help）" >&2; exit 2 ;;
+    -h|--help)   sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "未知参数：${arg}（试试 --help）" >&2; exit 2 ;;
   esac
 done
 
@@ -55,7 +55,7 @@ if [ "$PUBLISH" = "1" ]; then
 fi
 
 # ---------- 构建（隔离目录，不碰 dist/） ----------
-echo "==> 构建 $APP_NAME $VERSION（落 release/stage，dist/ 不动）"
+echo "==> 构建 $APP_NAME ${VERSION}（落 release/stage，dist/ 不动）"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 if [ "$UNIVERSAL" = "1" ]; then

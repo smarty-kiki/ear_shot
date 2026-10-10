@@ -1,4 +1,4 @@
-.PHONY: help build universal debug run preview extract transcribe test dmg publish clean
+.PHONY: help build universal debug run preview extract transcribe test check-bin dmg publish clean
 
 help:
 	@sed -n 's/^## //p' $(MAKEFILE_LIST)
@@ -19,8 +19,8 @@ debug:
 run:
 	./run.sh
 
-## test        离线自检全套（不需要 GUI / 权限；CI 跑的是同一套）
-test: build
+## test        离线自检全套（不需要 GUI / 权限；CI 跑的是同一套；不碰 dist/）
+test: check-bin
 	./build/EarShot --senttest
 	./build/EarShot --settingstest
 	./build/EarShot --wavetest
@@ -30,16 +30,22 @@ test: build
 	./build/EarShot --hittest 200 300 4
 
 ## preview     离屏渲染各形态界面图到 /tmp/earshot-preview
-preview: build
+preview: check-bin
 	./build/EarShot --preview /tmp/earshot-preview
 
 ## extract     抽取链路自检（不依赖音频），例如 make extract F=testdata/sample-meeting.txt
-extract: build
+extract: check-bin
 	./build/EarShot --extract $(F)
 
 ## transcribe  语音识别自检，例如 make transcribe F=/tmp/t.aiff
-transcribe: build
+transcribe: check-bin
 	./build/EarShot --transcribe $(F)
+
+# 自检类目标共用的隔离构建：产物只进 build/check-app。dist/ 里那个 app 可能
+# 正挂着屏幕录制授权（ad-hoc 认 CDHash），重建就把授权抖掉，所以自检绝不碰它。
+## check-bin   自检类目标共用的隔离构建（不动 dist/）
+check-bin:
+	DIST_DIR="$(CURDIR)/build/check-app" ./build.sh
 
 ## dmg         打包发布 DMG 到 release/（不动 dist/）
 dmg:

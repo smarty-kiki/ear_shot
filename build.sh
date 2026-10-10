@@ -38,8 +38,8 @@ for arg in "$@"; do
     --universal) UNIVERSAL=1 ;;
     --debug)     DEBUG=1 ;;
     --clean)     CLEAN=1 ;;
-    -h|--help)   sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数：$arg（试试 --help）" >&2; exit 2 ;;
+    -h|--help)   sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "未知参数：${arg}（试试 --help）" >&2; exit 2 ;;
   esac
 done
 
@@ -117,7 +117,7 @@ fi
 printf 'APPL????' > "$BUNDLE/Contents/PkgInfo"
 
 SIGN_ID="${CODESIGN_IDENTITY:--}"
-echo "==> 签名（身份：$SIGN_ID）"
+echo "==> 签名（身份：${SIGN_ID}）"
 # ad-hoc（-）每次重建签名都会变，而屏幕录制授权绑签名 —— 重建后要重新授权。
 # 想让它跨重建保持：用固定签名身份（自签证书就行），
 #   CODESIGN_IDENTITY="<证书名>" ./build.sh
@@ -126,13 +126,13 @@ if codesign --force --sign "$SIGN_ID" --timestamp=none "$BUNDLE" 2>/dev/null; th
   if [ "$SIGN_ID" = "-" ]; then
     echo "   已签名（ad-hoc；不是 Developer ID，首次打开需右键→打开）"
   else
-    echo "   已签名（$SIGN_ID）"
+    echo "   已签名（${SIGN_ID}）"
   fi
 else
   if [ "$SIGN_ID" = "-" ]; then
     echo "   签名失败，本地仍可运行"
   else
-    echo "   签名失败（钥匙串里没有「$SIGN_ID」这个身份？），本地仍可运行"
+    echo "   签名失败（钥匙串里没有「${SIGN_ID}」这个身份？），本地仍可运行"
   fi
 fi
 
@@ -145,5 +145,5 @@ echo "    版本   $VERSION ($BUILD_NUMBER)"
 echo "    架构   $(lipo -archs "$BUNDLE/Contents/MacOS/$APP_NAME" 2>/dev/null || echo "$HOST_ARCH")"
 # 授权认什么：ad-hoc 认 CDHash（重建就变 → 要重新授权）；固定身份认证书（重建不变）
 if [ "$SIGN_ID" = "-" ] && [ -n "$CDHASH" ]; then
-  echo "    CDHash $CDHASH（ad-hoc 授权认哈希，重建就变）"
+  echo "    CDHash ${CDHASH}（ad-hoc 授权认哈希，重建就变）"
 fi
