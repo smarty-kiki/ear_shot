@@ -137,7 +137,9 @@ else
 fi
 
 SIZE="$(du -sh "$BUNDLE" | cut -f1)"
-CDHASH="$(codesign -dvv "$BUNDLE" 2>&1 | sed -n 's/^CDHash=//p' | head -1)"
+# macOS 27 起 codesign 打的是 "CandidateCDHash sha256=…"（40 位，TCC 认的就是它），
+# 老版本是 "CDHash="。两种都抓。
+CDHASH="$(codesign -dvvv "$BUNDLE" 2>&1 | sed -n -e 's/^CandidateCDHash sha256=//p' -e 's/^CDHash=//p' | head -1)"
 echo
 echo "==> 完成"
 echo "    产物   $BUNDLE  ($SIZE)"
