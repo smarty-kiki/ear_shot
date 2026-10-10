@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>耳录</string>
+	<key>CFBundleDisplayName</key>
+	<string>耳录</string>
+	<key>CFBundleExecutable</key>
+	<string>EarShot</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.smarty.earshot</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+
+	<!-- 麦克风：抓「我」说的话 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>耳录需要麦克风来听清你说的话，从中整理出待办事项。音频只在本机识别，不会上传。</string>
+
+	<!-- 系统音频（macOS 15+ 的录音权限）：抓会议软件里「对方」说的话 -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>耳录需要录制系统音频，才能听清会议里其他人说的话，从中整理出待办事项。音频只在本机识别，不会上传。</string>
+</dict>
+</plist>

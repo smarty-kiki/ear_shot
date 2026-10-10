@@ -1,0 +1,16 @@
+# 构建产物（make clean 可清）
+build/
+dist/
+release/
+*.dmg
+
+# Xcode / Swift
+*.xcuserstate
+xcuserdata/
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# 本机个人配置（Claude Code 的本地权限白名单之类，不进仓库）
+.claude/settings.local.json

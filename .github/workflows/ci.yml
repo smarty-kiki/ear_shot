@@ -1,0 +1,59 @@
+name: CI
+
+# main 的改动和所有 PR 都跑：构建 + 离线自检全套（不需要权限、不需要 key）。
+# 画界面用的 --preview / --animframes 不在这跑（要窗口环境，留本机）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    # macOS 26 镜像：SpeechAnalyzer 需要 SDK 26+（镜像自带 Xcode 26.x）
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境
+        run: |
+          sw_vers
+          xcodebuild -version
+          SDK_MAJOR="$(xcrun --show-sdk-version | cut -d. -f1)"
+          echo "macOS SDK：$(xcrun --show-sdk-version)"
+          if [ "$SDK_MAJOR" -lt 26 ]; then
+            echo "::error::SDK < 26，SpeechAnalyzer 编译不了；换带 Xcode 26+ 的 runner"
+            exit 1
+          fi
+
+      - name: 构建
+        run: ./build.sh
+
+      - name: 离线自检
+        run: |
+          set -e
+          for c in --senttest --settingstest --wavetest --pcmtest --echotest --states; do
+            echo "==> EarShot $c"
+            ./build/EarShot "$c"
+          done
+          echo "==> EarShot --hittest 200 300 4"
+          ./build/EarShot --hittest 200 300 4
+
+      # 在仓库 Settings → Secrets 里配了 DEEPSEEK_API_KEY 才跑（真 API 调用，
+      # 花 key 的钱）；没配就跳过 —— 抽取/提示词改动请在本机把电池跑绿再提 PR。
+      # --today 钉死：断言是围着这个日期写的。
+      - name: 抽取电池（可选，需要 DEEPSEEK_API_KEY secret）
+        if: env.DEEPSEEK_API_KEY != ''
+        run: |
+          set -e
+          mkdir -p "$HOME/.config/ear_shot"
+          printf '{"apiKey":"%s"}' "$DEEPSEEK_API_KEY" > "$HOME/.config/ear_shot/config.json"
+          ./build/EarShot --extract testdata/sample-meeting.txt --today 2026-10-10
+          ./build/EarShot --extract testdata/sample-myname.txt  --today 2026-10-10 --myName 王小明
