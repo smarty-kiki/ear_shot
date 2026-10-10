@@ -47,7 +47,7 @@ transcribe: check-bin
 check-bin:
 	DIST_DIR="$(CURDIR)/build/check-app" ./build.sh
 
-## dmg         打包发布 DMG 到 release/（不动 dist/）
+## dmg         打包发布 DMG 到 release/（通用二进制，不动 dist/）
 dmg:
 	./release.sh
 
