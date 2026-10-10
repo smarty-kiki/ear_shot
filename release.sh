@@ -2,8 +2,8 @@
 #
 # 打包发布 DMG（以及一键发 GitHub Release）
 #
-#   ./release.sh                 构建 + 打包 release/EarShot-<版本>.dmg
-#   ./release.sh --universal     同上，但打 arm64 + x86_64 通用二进制
+#   ./release.sh                 构建 + 打包 release/EarShot-<版本>.dmg（通用二进制）
+#   ./release.sh --universal     兼容保留：产物本来就是 arm64 + x86_64，加不加一样
 #   ./release.sh --publish       打包后打 tag 并创建 GitHub Release（需 gh 已登录）
 #   ./release.sh --help
 #
@@ -26,11 +26,10 @@ APP_NAME="EarShot"
 RELEASE_DIR="$ROOT/release"
 STAGE="$RELEASE_DIR/stage"
 
-UNIVERSAL=0
 PUBLISH=0
 for arg in "$@"; do
   case "$arg" in
-    --universal) UNIVERSAL=1 ;;
+    --universal) ;;   # 兼容保留：产物一律通用二进制
     --publish)   PUBLISH=1 ;;
     -h|--help)   sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "未知参数：${arg}（试试 --help）" >&2; exit 2 ;;
@@ -55,14 +54,11 @@ if [ "$PUBLISH" = "1" ]; then
 fi
 
 # ---------- 构建（隔离目录，不碰 dist/） ----------
-echo "==> 构建 $APP_NAME ${VERSION}（落 release/stage，dist/ 不动）"
+echo "==> 构建 $APP_NAME ${VERSION}（通用二进制，落 release/stage，dist/ 不动）"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
-if [ "$UNIVERSAL" = "1" ]; then
-  DIST_DIR="$STAGE" ./build.sh --universal
-else
-  DIST_DIR="$STAGE" ./build.sh
-fi
+# 发布产物一律 arm64 + x86_64：README 承诺「macOS 26+」，Intel Mac 用户也要能打开
+DIST_DIR="$STAGE" ./build.sh --universal
 
 # ---------- 组装 DMG 内容 ----------
 echo "==> 组装 DMG"
