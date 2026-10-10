@@ -192,6 +192,8 @@ Sources/
   Settings.swift     设置窗口（草稿表单 + 测试连接 + 自检）
   Preview.swift      离屏渲染
   SoundPlayer.swift  提示音
+tools/
+  make-icon.swift    应用图标（代码画的，--install 出 Resources/AppIcon.icns）
 ```
 
 ## 已知限制
