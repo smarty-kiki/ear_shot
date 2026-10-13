@@ -531,10 +531,12 @@ enum PcmSelfCheck {
         let floatsPerBuffer = frames * (interleaved ? channels : 1)
         let bytesPerFrame = interleaved ? 4 * channels : 4
 
-        // 源数据：确定但看着乱，必须原样回来
-        let srcs: [[Float]] = (0..<bufferCount).map { b in
-            (0..<floatsPerBuffer).map { i in
-                Float((b * 100_003 + i * 7919) % 8192 - 4096) / 4096
+        // 源数据：确定但看着乱，必须原样回来。
+        // 逐句写死类型：一坨嵌套 map 会让 CI 上旧一档的编译器类型检查超时
+        let srcs: [[Float]] = (0..<bufferCount).map { b -> [Float] in
+            (0..<floatsPerBuffer).map { i -> Float in
+                let raw: Int = (b * 100_003 + i * 7919) % 8192 - 4096
+                return Float(raw) / 4096
             }
         }
 
