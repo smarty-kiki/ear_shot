@@ -45,6 +45,8 @@ jobs:
           done
           echo "==> EarShot --hittest 200 300 4"
           ./build/EarShot --hittest 200 300 4
+          echo "==> EarShot --hittest 200 324 4 0 --heights 116,130.5,145,130.5"
+          ./build/EarShot --hittest 200 324 4 0 --heights 116,130.5,145,130.5
 
       # 在仓库 Settings → Secrets 里配了 DEEPSEEK_API_KEY 才跑（真 API 调用，
       # 花 key 的钱）；没配就跳过 —— 抽取/提示词改动请在本机把电池跑绿再提 PR。

@@ -58,8 +58,7 @@ final class EarShotController {
                 // 先看滚动条原本在不在底部 —— 在底部就继续跟着最新的走，
                 // 用户翻上去看历史了就别把他拽下来
                 let wasAtBottom = self.ui.scrollOffset >= self.ui.maxScroll - 1
-                let rows = max(2, items.count)
-                if self.ui.rows != rows { self.ui.rows = rows }
+                self.ui.syncRows(items)
                 if wasAtBottom {
                     self.ui.scrollOffset = self.ui.maxScroll
                 } else {
@@ -684,8 +683,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch action {
         case .openSettings:
             openSettings()
-        case .grantScreenRecording:
-            listener.requestScreenRecording()
+        case .grantAudioCapture:
+            listener.requestAudioCapture()
         }
     }
 
@@ -724,8 +723,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         // 没授权时，菜单里也给一条 —— 面板可能正收着，菜单是另一条路
-        if store.problemAction == .grantScreenRecording {
-            menu.addItem(makeItem("授予屏幕录制权限…", #selector(grantScreenRecording), ""))
+        if store.problemAction == .grantAudioCapture {
+            menu.addItem(makeItem("授予录制电脑音频权限…", #selector(grantAudioCapture), ""))
             menu.addItem(.separator())
         }
 
@@ -787,7 +786,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func togglePanel() { controller.toggleExpand() }
     @objc private func toggleListeningItem() { controller.toggleListening() }
-    @objc private func grantScreenRecording() { controller.onProblemAction?(.grantScreenRecording) }
+    @objc private func grantAudioCapture() { controller.onProblemAction?(.grantAudioCapture) }
     @objc private func copyAll() { controller.store.copyAll() }
     @objc private func clearTodos() { controller.store.clear() }
     @objc private func openSettingsItem() { controller.onOpenSettings?() }

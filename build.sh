@@ -12,7 +12,7 @@
 #   DIST_DIR            产物落点（默认 dist/；release.sh 指到隔离目录，
 #                       免得打包动作踩本机正在验收/授权的那个 dist/EarShot.app）
 #   CODESIGN_IDENTITY   签名身份（默认 "-" ad-hoc；换固定证书可让
-#                       屏幕录制授权跨重建保持）
+#                       音频采集授权跨重建保持）
 #
 set -euo pipefail
 
@@ -22,7 +22,7 @@ cd "$ROOT"
 APP_NAME="EarShot"
 BUNDLE_ID="com.smarty.earshot"
 # SpeechAnalyzer / SpeechTranscriber 是 macOS 26 起才有的 API，所以最低版本比
-# 隔壁任务坞（14.0）高一截。音频采集那边用的 SCStream.captureMicrophone 也是 15+。
+# 隔壁任务坞（14.0）高一截。采集不构成约束：Core Audio 进程 tap 从 14.2 起就有。
 MIN_MACOS="26.0"
 
 BUILD="$ROOT/build"
@@ -67,7 +67,7 @@ COMMON_FLAGS=(
   -framework SwiftUI
   -framework AVFoundation
   -framework Speech            # SpeechAnalyzer / SpeechTranscriber
-  -framework ScreenCaptureKit  # 系统音频 + 麦克风采集
+  -framework CoreAudio         # CATapDescription / 聚合设备（采集 + --taptest 探针）
   -framework CoreMedia
   -Xfrontend -disable-sandbox      # 关掉编译器自带的 sandbox，避免中间产物写入被拦
 )
@@ -118,7 +118,7 @@ printf 'APPL????' > "$BUNDLE/Contents/PkgInfo"
 
 SIGN_ID="${CODESIGN_IDENTITY:--}"
 echo "==> 签名（身份：${SIGN_ID}）"
-# ad-hoc（-）每次重建签名都会变，而屏幕录制授权绑签名 —— 重建后要重新授权。
+# ad-hoc（-）每次重建签名都会变，而音频采集授权绑签名 —— 重建后要重新授权。
 # 想让它跨重建保持：用固定签名身份（自签证书就行），
 #   CODESIGN_IDENTITY="<证书名>" ./build.sh
 # 再把产物固定放在 /Applications 或 ~/Applications 再授权，就基本一劳永逸。
