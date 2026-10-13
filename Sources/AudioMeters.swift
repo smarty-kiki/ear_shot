@@ -112,7 +112,7 @@ enum WaveSelfCheck {
         check(sine > 0.5 && sine < 0.75,
               "0.1 幅正弦 → \(String(format: "%.2f", sine))（应在 0.50…0.75）")
 
-        // 2) Int16 那条路（SCK 出来的就是它）跟 Float 路算出来一致
+        // 2) Int16 那条路（现在两路采集都出 Float32，这条当兜底）跟 Float 路算出来一致
         let i16 = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000,
                                 channels: 1, interleaved: false)!
         let sine16 = AudioMeters.level(of: tone(i16, amplitude: 0.1))

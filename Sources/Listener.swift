@@ -5,7 +5,7 @@ import Foundation
 ///
 /// 权限、模型下载、抽取节奏、失败提示都收在这里，界面只管读 `store` 上的
 /// `listening / statusText / problem` 三个字段 —— 界面不知道
-/// 底下是 ScreenCaptureKit 还是别的什么。两路声音的动静（标题栏那两条声纹）
+/// 底下是 Core Audio tap 还是别的什么。两路声音的动静（标题栏那两条声纹）
 /// 单独走 `meters`，不混进 store：它不是「待办仓库」的东西。
 ///
 /// 抽取节奏（断句分级 + 两道闸，和 Config 里那三个数一一对应）：
@@ -91,14 +91,9 @@ final class Listener {
             return
         }
 
-        // 2. 屏幕录制：采集合流的前置。没有它系统声音和麦克风都收不到，
-        //    而且授权后要重启 app 才生效 —— 这两句都得跟用户说明白
-        guard AudioCapture.screenRecordingGranted else {
-            showScreenRecordingProblem()
-            return
-        }
-
-        // 3. 麦克风：没有也能跑，只是听不见「我」—— 降级成单路
+        // 2. 麦克风：没有也能跑，只是听不见「我」—— 降级成单路。
+        //    （系统声音这边没有预检接口：权限在第一次建 tap 时才弹窗；没给的
+        //    话采集那边 8 秒就能认出来，再由 systemAudioState 提示 —— 这里不拦）
         let micOK = await AudioCapture.requestMic()
         guard gen == generation else { return }        // 等授权的工夫里被按了停止
         if !micOK {
@@ -164,6 +159,8 @@ final class Listener {
             }
         }, onInterrupted: { [weak self] err in
             Task { @MainActor in self?.interrupted(err) }
+        }, onSystemAudioState: { [weak self] alive in
+            Task { @MainActor in self?.systemAudioState(alive) }
         })
         do {
             try await cap.start(captureSystem: config.captureSystem, captureMic: micOK && config.captureMic)
@@ -171,7 +168,7 @@ final class Listener {
             await cap.stop()
             await startedMic?.stop()
             await startedSys?.stop()
-            if gen == generation { store.problem = "音频采集起不来：\(error)" }
+            if gen == generation { store.problem = "\(error)" }
             return
         }
         guard gen == generation else {
@@ -347,24 +344,33 @@ final class Listener {
 
     // MARK: - 故障
 
-    private func showScreenRecordingProblem() {
-        store.statusText = ""
-        store.problem = """
-            还没有屏幕录制权限（声音采集也要它）。
-            点「去授权」打开，然后重启耳录。
-            """
-        store.problemAction = .grantScreenRecording
-    }
-
-    /// 面板上「去授权」按下去：弹系统授权（首次会跳系统设置），然后按结果更新提示
-    func requestScreenRecording() {
-        AudioCapture.requestScreenRecording()
-        if AudioCapture.screenRecordingGranted {
-            store.problem = "屏幕录制已授权。重启耳录，就能开听了。"
+    /// 系统声音「一直没帧」—— 多半是「录制电脑音频」权限没给（拒绝了不报错，
+    /// 静默给零帧，只能这样认出来）。
+    ///
+    /// 不中断监听：麦克风那路还能用，授权之后数据自己会来、提示自己会收。
+    /// 题外一句：只要还听着，正常情况下这里永远轮不到 —— 来数据时会先报 true
+    private func systemAudioState(_ alive: Bool) {
+        guard listening else { return }
+        if alive {
+            guard store.problemAction == .grantAudioCapture else { return }
+            AppDebug.log("[listen] 系统声音来了，把权限提示收掉")
+            store.problem = nil
             store.problemAction = nil
         } else {
-            showScreenRecordingProblem()
+            store.problem = """
+                系统声音一直没收到。屏幕上要刚弹过权限窗，点「允许」就好；
+                没弹过（或点过不允许），点「去授权」去打开开关。
+                """
+            store.problemAction = .grantAudioCapture
         }
+    }
+
+    /// 面板上「去授权」按下去：跳系统设置（系统音频没有申请接口，只能把人
+    /// 带到那一页）。授权后不用重启耳录 —— 回来点「开始监听」重试就行
+    func requestAudioCapture() {
+        AudioCapture.openAudioCaptureSettings()
+        store.problem = "把「耳录」的开关打开，回来点「开始监听」再试一次。"
+        store.problemAction = nil
     }
 
     private func interrupted(_ error: Error) {

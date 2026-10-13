@@ -37,10 +37,12 @@ if cliArgs.contains("--animframes") {
 }
 
 // 命中映射自检：EarShot --hittest <面板内x> <面板内y> [行数] [滚动偏移] [--problem]
+//                   [--heights 116,130.5,145,130.5]
 //
 // 点击是这个工具唯一的手势，所以「点哪儿算点到什么」必须能离屏验。
 // 本环境没有合成点击的权限，只能把纯函数单独捞出来打表。
 // `--problem` = 中间区在显示故障提示（那颗按钮是这时唯一可点的东西）。
+// `--heights` = 逐行行高（不等高列表的命中自检）。
 if let idx = cliArgs.firstIndex(of: "--hittest") {
     let a = cliArgs
     let x = idx + 1 < a.count ? (Double(a[idx + 1]) ?? 0) : 0
@@ -51,14 +53,20 @@ if let idx = cliArgs.firstIndex(of: "--hittest") {
     let ui = UIState()
     ui.rows = rows
     ui.scrollOffset = CGFloat(scroll)
+    if let hi = cliArgs.firstIndex(of: "--heights"), hi + 1 < a.count {
+        ui.rowHeights = a[hi + 1].split(separator: ",").compactMap { Double($0) }.map { CGFloat($0) }
+    }
 
     let rowsTop = Int(ui.edgeMargin + ui.headerHeight)
     let rowsBottom = Int(ui.edgeMargin + ui.headerHeight + ui.rowsViewportHeight)
     let footerTop = Int(ui.edgeMargin + ui.expandedHeight - ui.footerHeight)
     let bottom = Int(ui.edgeMargin + ui.expandedHeight)
 
+    let heightText = ui.rowHeights.isEmpty
+        ? "行高 \(Int(ui.rowHeight))"
+        : "逐行行高 " + ui.rowHeights.map { String(format: "%.1f", $0) }.joined(separator: ",")
     print("面板 \(Int(ui.expandedSize.width))×\(Int(ui.expandedSize.height))"
-          + "  条数=\(rows)  行高 \(Int(ui.rowHeight))  滚动 \(Int(ui.scrollOffset))"
+          + "  条数=\(rows)  \(heightText)  滚动 \(Int(ui.scrollOffset))"
           + (problem ? "  故障态" : ""))
     print("高度上限 \(Int(ui.maxShapeHeight))  天然行区高 \(Int(ui.naturalRowsHeight))"
           + "  可视行区高 \(Int(ui.rowsViewportHeight))  滚动=\(ui.scrolls ? "是" : "否")  上限 \(Int(ui.maxScroll))")
@@ -171,8 +179,9 @@ if let path = argValue(after: "--transcribe") {
 
 // PCM 转换自检：EarShot --pcmtest
 //
-// 合成「和 SCK 送出来形状一致」的音频帧跑一遍转换函数。不用权限、不用真人。
-// 这段转换以前只有「授权后看日志」一条验证路，-12731 就那样卡了一整轮。
+// 合成和 Core Audio tap 送出来形状一致的音频块（48k · 立体声 · Float32，
+// 交织/非交织各一）跑一遍转换函数，逐字节比对。不用权限、不用真人 ——
+// 采集链路上唯一不能靠音频文件自检覆盖的一段，只能先把字节级的路验死。
 if cliArgs.contains("--pcmtest") {
     exit(PcmSelfCheck.run())
 }
@@ -213,11 +222,22 @@ if cliArgs.contains("--settingstest") {
 
 // 采集联跑自检：EarShot --capture [秒数] [--verbose]
 //
-// 采集 + 识别一起跑，需要屏幕录制（+麦克风）权限。没授权只报状态，不弹窗。
+// 采集 + 识别一起跑，要权限才听得到东西，不弹窗。系统声音那路从终端直跑
+// 测不到（TCC 把责任进程算在终端头上），要验它用 `make taptest` 或真 app。
 if cliArgs.contains("--capture") {
     let secs = argValue(after: "--capture").flatMap(Double.init) ?? 20
     let code = await CaptureSelfCheck.run(seconds: secs, verbose: cliArgs.contains("--verbose"))
     exit(code)
+}
+
+// 锁屏收音探针：EarShot --taptest [秒数]
+//
+// 生产的系统声音采集就是这套 tap（AudioCapture.startSystemTap 与这里同源），
+// 探针留着做回归：动过 tap 配置、换过系统/机器之后，锁屏断不断用它验。
+// 要音频录制权限 + 真人锁一次屏，不是离线自检，别进 `make test`。（`make taptest`）
+if cliArgs.contains("--taptest") {
+    let secs = argValue(after: "--taptest").flatMap(Double.init) ?? 120
+    exit(await TapProbe.run(seconds: secs, logPath: argValue(after: "--log")))
 }
 
 // 入口：无 Dock 图标的后台常驻应用

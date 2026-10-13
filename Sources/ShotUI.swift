@@ -1,6 +1,74 @@
 import SwiftUI
 import AppKit
 
+// MARK: - 行几何
+
+/// 不等高行几何：说明（artifactDesc）默认换行、最多 4 行、超出用中间省略号，
+/// 行高随说明行数长。
+///
+/// 行数与高度是两套口径，别混（都是墨迹实测）：
+/// - **数行数**用 NSAttributedString 在 `descWrapWidth` 下量（首行 12 + 步进 13.5×(n−1)）
+/// - **排高度**按 SwiftUI 渲染口径，行步进 **14.5**（首行 13 + lineSpacing 1.5）。
+///   别把 14.5「修正」成 13.5 —— 槽高按 13.5 算会矮一行，SwiftUI 会把
+///   最后一行的高度提案当截断依据，文字无声少一行。
+enum RowMetrics {
+    /// 面板宽：420 收窄 50
+    static let panelWidth: CGFloat = 370
+
+    /// 说明 1 行时的行高
+    static let baseRowHeight: CGFloat = 116
+    static let actionLineHeight: CGFloat = 17
+    /// 单行字段槽高：渲染首行 13 + 1pt 余量
+    static let fieldLineHeight: CGFloat = 14
+    static let lineSpacing: CGFloat = 1.5
+    static let descLineLimit = 4
+
+    static let labelWidth: CGFloat = 40
+    static let rowPadding: CGFloat = 14
+    static let seqColumnWidth: CGFloat = 32
+    static let rowSpacing: CGFloat = 8
+    /// 字段值外面造高亮底色的 ±3 内衬
+    static let valuePadding: CGFloat = 3
+
+    /// SwiftUI 渲染的 10.5pt 行步进（@2x 墨迹带间距恒为 29px）
+    static let lineStep: CGFloat = 14.5
+
+    /// 说明正文换行宽度 = 370−14×2−32−8×2−40−3×2 = 248。
+    /// 行上给说明加了同宽的 `maxWidth` 上限，让渲染宽度和这里的量宽严格一致
+    static var descWrapWidth: CGFloat {
+        panelWidth - rowPadding * 2 - seqColumnWidth - rowSpacing * 2
+            - labelWidth - valuePadding * 2
+    }
+
+    /// 说明文本占几行（1…4）
+    static func descLines(of text: String) -> Int {
+        guard !text.isEmpty else { return 1 }
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = lineSpacing
+        style.lineBreakMode = .byWordWrapping
+        let a = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 10.5), .paragraphStyle: style,
+        ])
+        let h = a.boundingRect(with: NSSize(width: descWrapWidth, height: 1e6),
+                               options: [.usesLineFragmentOrigin, .usesFontLeading]).height
+        return min(max(Int(((h - 12) / 13.5).rounded()) + 1, 1), descLineLimit)
+    }
+
+    static func descSlotHeight(_ lines: Int) -> CGFloat {
+        fieldLineHeight + lineStep * CGFloat(lines - 1)
+    }
+
+    /// 行高按**行上实际显示的**说明算（ghost 的旧值也算 —— 它也在演）
+    static func rowHeight(for todo: TodoItem) -> CGFloat {
+        let shown = todo.ghost[.artifactDesc] ?? todo.value(.artifactDesc) ?? ""
+        return rowHeight(descLines: descLines(of: shown))
+    }
+
+    static func rowHeight(descLines lines: Int) -> CGFloat {
+        baseRowHeight + lineStep * CGFloat(lines - 1)
+    }
+}
+
 // MARK: - 尺寸与状态
 
 final class UIState: ObservableObject {
@@ -9,6 +77,9 @@ final class UIState: ObservableObject {
     @Published var progress: CGFloat = 0
     /// 列表里有几条待办（由控制器按数据同步）。**不限条数**，全在。
     @Published var rows = 4
+
+    /// 逐行行高（不等高）。空 = 还没有数据，一律按单行行高兜底
+    @Published var rowHeights: [CGFloat] = []
 
     /// 行区滚动偏移（pt，0 = 顶）。条数多到装不下时，行区变成内部滚动。
     @Published var scrollOffset: CGFloat = 0
@@ -25,11 +96,11 @@ final class UIState: ObservableObject {
 
     let headerHeight: CGFloat = 34
     let footerHeight: CGFloat = 44
-    /// 六行字段（待办 + 时间/地点/人物/输出物/说明）
-    let rowHeight: CGFloat = 116
+    /// 单行（说明 1 行）的行高，逐行高缺失时的兜底
+    var rowHeight: CGFloat { RowMetrics.baseRowHeight }
 
     /// 面板可见宽度
-    let panelWidth: CGFloat = 420
+    let panelWidth: CGFloat = RowMetrics.panelWidth
     /// 收起时把手尺寸
     let tabSize = CGSize(width: 32, height: 68)
 
@@ -45,7 +116,7 @@ final class UIState: ObservableObject {
 
     /// 把手 32 宽配 16 圆角 = 胶囊
     let tabCornerRadius: CGFloat = 16
-    /// 展开态的圆角，比按比例算出来的大一些，否则在 420 宽上看着像直角
+    /// 展开态的圆角，比按比例算出来的大一些，否则在 370 宽上看着像直角
     let panelCornerRadius: CGFloat = 26
 
     /// 右边缘与屏幕上/下边交界处的反角（凹角）半径。
@@ -65,13 +136,14 @@ final class UIState: ObservableObject {
 
     let footerPadding: CGFloat = 12
     let footerSpacing: CGFloat = 6
-    /// 底栏左起四个按钮宽度：开始监听 / 清空 / 复制全部 / 设置
+    /// 底栏左起四个按钮宽度：开始监听 / 清空 / 复制全部 / 设置。
+    /// 面板 370 宽下要能塞下四个 + 退出：左四块到 290 结束，退出从 300 起
     ///
     /// 宽度是死数，因为命中区是纯坐标算的（见 `footerZones`）——
     /// 加按钮必须连宽度一起加在这里，只改视图不改这里 = 点了没反应
-    let footerLeftWidths: [CGFloat] = [96, 62, 76, 62]
+    let footerLeftWidths: [CGFloat] = [80, 54, 72, 54]
     /// 最右「退出」按钮宽度
-    let footerQuitWidth: CGFloat = 62
+    let footerQuitWidth: CGFloat = 58
 
     /// 底栏各按钮在「形状内」的 x 区间（0 = 形状左边缘）
     var footerZones: [(index: Int, range: ClosedRange<CGFloat>)] {
@@ -102,11 +174,28 @@ final class UIState: ObservableObject {
                height: problemButtonSize.height)
     }
 
-    /// 列表至少要留两行的高度，空列表也是有话要说的时候
-    private var displayRows: CGFloat { CGFloat(max(rows, 2)) }
+    /// 前 n 行的总高（超出逐行数据的按单行高算：空列表撑出的占位行）
+    func totalHeight(ofRows n: Int) -> CGFloat {
+        let k = min(n, rowHeights.count)
+        return rowHeights[0..<k].reduce(0, +) + CGFloat(max(0, n - k)) * rowHeight
+    }
 
-    /// 行区「天然」高度：有几条就有多高，不限
-    var naturalRowsHeight: CGFloat { displayRows * rowHeight }
+    /// 第 i 行的行高
+    func height(ofRow i: Int) -> CGFloat {
+        i >= 0 && i < rowHeights.count ? rowHeights[i] : rowHeight
+    }
+
+    /// 按数据同步行数与逐行行高（控制器在 todos 变化时调）
+    func syncRows(_ todos: [TodoItem]) {
+        let n = max(2, todos.count)
+        if rows != n { rows = n }
+        let heights = todos.map(RowMetrics.rowHeight(for:))
+        if rowHeights != heights { rowHeights = heights }
+    }
+
+    /// 行区「天然」高度：有几条就有多高（说明换行的行更高），不限。
+    /// 列表至少要留两行，空列表也是有话要说的时候
+    var naturalRowsHeight: CGFloat { totalHeight(ofRows: max(rows, 2)) }
 
     /// 行区可视高度。条数不多就贴合内容（面板随条数长高），
     /// 长到面板上限就停住 —— 再多的部分靠内部滚动看。
@@ -139,10 +228,11 @@ final class UIState: ObservableObject {
     /// 而不是列表突然从这一条开始。
     func scrollToFocus(row i: Int) {
         guard scrolls, i >= 0 else { return }
-        let top = CGFloat(i) * rowHeight
+        let top = totalHeight(ofRows: i)
+        let h = height(ofRow: i)
         guard top < naturalRowsHeight else { return }
-        if top >= scrollOffset, top + rowHeight <= scrollOffset + rowsViewportHeight { return }
-        scrollOffset = min(max(top - rowHeight / 2, 0), maxScroll)
+        if top >= scrollOffset, top + h <= scrollOffset + rowsViewportHeight { return }
+        scrollOffset = min(max(top - h / 2, 0), maxScroll)
     }
 
     /// 面板形状高度：跟着条数长，长到上限就不长了
@@ -279,7 +369,7 @@ extension UIState {
     /// 抽成纯函数是为了能离屏验证——本环境没有合成点击的权限。
     /// `--hittest` 打的就是它。
     /// - Parameter scroll: 当前行区滚动偏移。行区滚起来之后，屏幕上第 i 行
-    ///   对应的是内容里的第 `i + scroll / rowHeight` 行 —— 命中判定必须减掉它，
+    ///   对应的是内容里更靠后的某行 —— 命中判定必须减掉它，
     ///   否则滚过之后「点到的那条」和「复制走的那条」就对不上了。
     /// - Parameter showingProblem: 中间区这会儿显示的是故障提示（不是列表）。
     ///   必须传对：行区被提示盖住时若还按行算，点一下会「复制到一条看不见的待办」。
@@ -311,8 +401,14 @@ extension UIState {
         let rowsTop = edgeMargin + headerHeight
         let rowsBottom = rowsTop + rowsViewportHeight
         guard p.y >= rowsTop, p.y < rowsBottom, rowCount > 0 else { return .panel }
-        let i = Int((p.y - rowsTop + scroll) / rowHeight)
-        return (i >= 0 && i < rowCount) ? .row(i) : .panel
+        // 行不等高，逐行累加找落在哪条上
+        var y = p.y - rowsTop + scroll
+        for i in 0..<rowCount {
+            let h = height(ofRow: i)
+            if y < h { return .row(i) }
+            y -= h
+        }
+        return .panel
     }
 }
 
@@ -774,11 +870,11 @@ private struct FooterChip: View {
 
 /// 多行完整样式：六行「字段名 + 值」，缺失字段显示灰色 `—`。
 ///
-/// 固定行高让列表整齐、`hitTest` 保持整数除法（简单可靠），
-/// 而且「哪些字段还没补全」一眼可见——正好对应增量补全的产品感。
+/// 行高随说明行数变（见 `RowMetrics`，「哪些字段还没补全」一眼可见，
+/// 正好对应增量补全的产品感）。
 ///
 /// **所有状态反馈都是整块的**（悬停、刚被抽取动过、已复制、正在删除），
-/// 不做成某一行字变色：一行 116pt 里塞着六行字，在里头找「已复制」三个小字
+/// 不做成某一行字变色：一行里塞着六行字，在里头找「已复制」三个小字
 /// 太费劲；整块变色等于直接说「你碰的就是这一块」，不用找。
 ///
 /// 唯一往字段里钻的是两处：**刚补上的值自己亮一块底**（回答「补了什么」），
@@ -806,20 +902,27 @@ private struct TodoRow: View {
         return (.clear, 0)
     }
 
-    /// 值那一列的起点：label 固定宽度，保证六行值左边缘对齐
-    private let labelWidth: CGFloat = 40
+    private static let actionLineHeight = RowMetrics.actionLineHeight
+    private static let fieldLineHeight = RowMetrics.fieldLineHeight
+    private static let lineSpacing = RowMetrics.lineSpacing
 
-    /// 六行加起来正好填满 rowHeight：行高必须**精确**等于 `UIState.rowHeight`，
-    /// 多一个点都会让 hitTest 的整除算出来的行号和眼睛看到的行错位。
-    private static let actionLineHeight: CGFloat = 17
-    private static let fieldLineHeight: CGFloat = 14
-    private static let lineSpacing: CGFloat = 1.5
-    private static var contentHeight: CGFloat {
-        actionLineHeight + fieldLineHeight * 5 + lineSpacing * 5
+    /// 行上实际显示的说明（ghost 的旧值也在演，算它）
+    private var descShown: String {
+        todo.ghost[.artifactDesc] ?? todo.value(.artifactDesc) ?? ""
+    }
+    private var descLines: Int { RowMetrics.descLines(of: descShown) }
+    private var descSlotHeight: CGFloat { RowMetrics.descSlotHeight(descLines) }
+
+    /// 必须**精确**等于 `UIState.rowHeights`（即 RowMetrics.rowHeight），
+    /// 差一点 hitTest 算出的行号就和眼睛看到的行错位
+    private var rowHeight: CGFloat { RowMetrics.rowHeight(descLines: descLines) }
+    /// 六行字段的总高：动作行 + 4 个单行字段 + 说明槽
+    private var contentHeight: CGFloat {
+        Self.actionLineHeight + Self.fieldLineHeight * 4 + descSlotHeight + Self.lineSpacing * 5
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: RowMetrics.rowSpacing) {
             seqColumn
             VStack(alignment: .leading, spacing: Self.lineSpacing) {
                 ForEach(TodoItem.Field.allCases, id: \.self) { f in
@@ -828,10 +931,10 @@ private struct TodoRow: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, RowMetrics.rowPadding)
         // 上下留白对称，内容在行高里居中
-        .padding(.top, (116 - Self.contentHeight) / 2)
-        .frame(height: 116, alignment: .top)
+        .padding(.top, (rowHeight - contentHeight) / 2)
+        .frame(height: rowHeight, alignment: .top)
         .background(block.color.opacity(block.opacity))
         .overlay(alignment: .trailing) {
             if copied { copiedBadge } else if todo.deleting { deletingBadge }
@@ -865,7 +968,7 @@ private struct TodoRow: View {
                         .fill(Color.white.opacity(todo.isNew ? 0.12 : 0.08))
                 )
         }
-        .frame(width: 32)
+        .frame(width: RowMetrics.seqColumnWidth)
     }
 
     @ViewBuilder
@@ -882,7 +985,7 @@ private struct TodoRow: View {
                 .foregroundStyle(ghost != nil ? Self.removalRed.opacity(0.75)
                                  : touched ? AlertLevel.new.color.opacity(0.9)
                                  : Color(white: 0.42))
-                .frame(width: labelWidth, alignment: .leading)
+                .frame(width: RowMetrics.labelWidth, alignment: .leading)
             Text(shown ?? "—")
                 .font(.system(size: f == .action ? 12 : 10.5,
                               weight: f == .action ? .medium : .regular))
@@ -891,18 +994,24 @@ private struct TodoRow: View {
                                  : touched ? AlertLevel.new.color
                                  : Color(white: 0.92))
                 .strikethrough(ghost != nil, color: Self.removalRed)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                .lineLimit(f == .artifactDesc ? RowMetrics.descLineLimit : 1)
+                .truncationMode(f == .artifactDesc ? .middle : .tail)
+                .lineSpacing(f == .artifactDesc ? RowMetrics.lineSpacing : 0)
+                // 说明按固定宽度换行，宽度和 descLines 的量宽严格一致
+                .frame(maxWidth: f == .artifactDesc ? RowMetrics.descWrapWidth : nil,
+                       alignment: .leading)
                 // 刚补上的值自己亮一块底：一行六行字里只让「时间」这种小标签
                 // 变色太容易滑过去。正的 padding 造出底色、负的 padding 把
                 // 版式抵回去，加不加底色值都在同一个位置
-                .padding(.horizontal, 3).padding(.vertical, 0.5)
+                .padding(.horizontal, RowMetrics.valuePadding).padding(.vertical, 0.5)
                 .background(RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .fill(AlertLevel.new.color.opacity(touched ? 0.16 : 0)))
-                .padding(.horizontal, -3).padding(.vertical, -0.5)
+                .padding(.horizontal, -RowMetrics.valuePadding).padding(.vertical, -0.5)
             Spacer(minLength: 0)
         }
-        .frame(height: f == .action ? Self.actionLineHeight : Self.fieldLineHeight)
+        .frame(height: f == .action ? Self.actionLineHeight
+                      : f == .artifactDesc ? descSlotHeight
+                      : Self.fieldLineHeight)
     }
 
     /// 「已删除」徽章：压在整块变红的这一行右边。和「已复制」同一个路数，
@@ -983,7 +1092,7 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func scrollWheel(with event: NSEvent) {
         var d = event.scrollingDeltaY
         // 触控板给的是精确点数，鼠标滚轮给的是「行」。一格当 13pt 走，
-        // 大约三格一行 —— 一行 116pt，滚快了根本看不清看了哪条。
+        // 大约八九格才滚过一行，滚快了根本看不清看了哪条。
         if !event.hasPreciseScrollingDeltas { d *= 13 }
         if d != 0 { onScroll?(d) }
         super.scrollWheel(with: event)

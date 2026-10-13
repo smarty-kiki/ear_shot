@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// 离屏渲染自检：不需要屏幕录制/麦克风权限，直接把界面渲染成 PNG。
+/// 离屏渲染自检：不需要音频采集/麦克风权限，直接把界面渲染成 PNG。
 ///
 /// 用法：
 ///   EarShot --preview <输出目录>
@@ -21,13 +21,16 @@ enum PreviewRunner {
                      updatedAt: now.addingTimeInterval(-age), isNew: new, touched: [])
         }
         return [
+            // 说明刻意放长：4 行装的装不下 → 中间省略号，是这张图要盯的东西
             t(1, "把 Q3 复盘 PPT 发给老王",
               time: "周五前", location: "会议室 A", person: "老王",
-              artifact: "Q3 复盘 PPT", desc: "含数据看板，12 页左右",
+              artifact: "Q3 复盘 PPT",
+              desc: "含数据看板，12 页左右，重点是留存和转化两页，第 8 页那张趋势图记得换成最新口径的数据，别再用上个月的，另外把 Q2 复盘里提到的三个风险点也并进去，最后一页放行动项和负责人，发之前先给我过一眼",
               new: false, age: 900),
             t(2, "收齐客户反馈表",
               time: "这周五之前", person: "小李",
-              artifact: "客户反馈表", desc: "只要华东区的",
+              artifact: "客户反馈表",
+              desc: "只要华东区的，华南和西南的先放一放，下轮再统一补上，口径和上季度保持一致",
               new: false, age: 600),
             t(3, "约下周一的技术评审",
               time: "下周一 14:00", location: "线上", person: "张工、小陈",
@@ -112,7 +115,7 @@ enum PreviewRunner {
         let store = TodoStore()
         let meters = AudioMeters()
 
-        func sync() { ui.rows = store.rowCount }
+        func sync(_ s: TodoStore) { ui.syncRows(s.todos) }
 
         // 预览画布 = 真实窗口尺寸：收起时是「把手 + 光晕留白」，展开时是「面板 + 留白」。
         // 动画中间帧的窗口已经撑到展开尺寸，所以那里统一用 expandedSize。
@@ -124,7 +127,7 @@ enum PreviewRunner {
         store.addTokens(18_642)          // 演示：这轮打开已经抽过几轮，大脑徽章亮着
         store.listening = false
         store.acknowledge()
-        ui.expanded = false; ui.progress = 0; sync()
+        ui.expanded = false; ui.progress = 0; sync(store)
         render(name: "01-收起-未监听.png", size: canvas(), store: store, ui: ui, prefs: prefs,
                meters: meters, outDir: outDir)
 
@@ -134,12 +137,12 @@ enum PreviewRunner {
                meters: meters, outDir: outDir)
 
         store.seed(demoTodos())          // 未读回来，外框亮
-        ui.expanded = false; ui.progress = 0; sync()
+        ui.expanded = false; ui.progress = 0; sync(store)
         render(name: "03-收起-未读.png", size: canvas(), store: store, ui: ui, prefs: prefs,
                meters: meters, outDir: outDir)
 
         // ---- 展开：条目齐全的样子 ----
-        ui.expanded = true; ui.progress = 1; sync()
+        ui.expanded = true; ui.progress = 1; sync(store)
         render(name: "04-展开.png", size: canvas(), store: store, ui: ui, prefs: prefs,
                meters: meters, outDir: outDir)
 
@@ -153,7 +156,7 @@ enum PreviewRunner {
         // 「有没有在听」由标题栏两条声纹表达：波形是活的，列表空着也安心
         let empty = TodoStore()
         empty.listening = true
-        ui.rows = empty.rowCount
+        sync(empty)
         pushDemoBars(meters)
         render(name: "06-展开-空.png", size: canvas(), store: empty, ui: ui, prefs: prefs,
                meters: meters, outDir: outDir)
@@ -164,18 +167,18 @@ enum PreviewRunner {
         let broken = TodoStore()
         broken.problem = "还没配 API Key —— 点下面「去设置」，把 DeepSeek 的 Key 填上"
         broken.problemAction = .openSettings
-        ui.rows = broken.rowCount
+        sync(broken)
         render(name: "07-展开-故障.png", size: canvas(), store: broken, ui: ui, prefs: prefs,
                meters: meters, outDir: outDir)
 
-        // ---- 展开 + 故障（没屏幕录制权限）：带「去授权」按钮 ----
+        // ---- 展开 + 故障（没「录制电脑音频」权限）：带「去授权」按钮 ----
         let noPerm = TodoStore()
         noPerm.problem = """
-            还没有屏幕录制权限（声音采集也要它）。
-            点「去授权」打开，然后重启耳录。
+            系统声音一直没收到。屏幕上要刚弹过权限窗，点「允许」就好；
+            没弹过（或点过不允许），点「去授权」去打开开关。
             """
-        noPerm.problemAction = .grantScreenRecording
-        ui.rows = noPerm.rowCount
+        noPerm.problemAction = .grantAudioCapture
+        sync(noPerm)
         render(name: "13-展开-故障-去授权.png", size: canvas(),
                store: noPerm, ui: ui, prefs: prefs, meters: meters, outDir: outDir)
 
@@ -183,7 +186,7 @@ enum PreviewRunner {
         let changed = TodoStore()
         changed.seed(demoChangeStates())
         changed.addTokens(18_642)        // 刚发生过抽取 → 大脑徽章亮着
-        ui.rows = changed.rowCount
+        sync(changed)
         ui.scrollOffset = 0
         render(name: "12-展开-变化反馈.png", size: animCanvas(),
                store: changed, ui: ui, prefs: prefs, meters: meters, outDir: outDir)
@@ -192,7 +195,7 @@ enum PreviewRunner {
         let many = TodoStore()
         many.seed(manyTodos(9))
         many.addTokens(18_642)
-        ui.rows = many.rowCount
+        sync(many)
         ui.scrollOffset = 0
         render(name: "09-展开-多条-顶.png", size: animCanvas(), store: many, ui: ui, prefs: prefs,
                meters: meters, outDir: outDir)
@@ -205,7 +208,7 @@ enum PreviewRunner {
         ui.scrollOffset = 0
 
         // ---- 生长动画关键帧 ----
-        ui.rows = store.rowCount
+        sync(store)
         pushDemoBars(meters)             // 回到监听中的主场景，声纹恢复波形
         for (i, p) in [CGFloat(0.35), 0.7].enumerated() {
             ui.expanded = p > 0.01
@@ -230,7 +233,7 @@ enum PreviewRunner {
         // 这组帧看的是形状生长，场景里没在监听 → 声纹平着，也是真实形态
         let meters = AudioMeters()
         store.seed(demoTodos())
-        ui.rows = store.rowCount
+        ui.syncRows(store.todos)
 
         let steps: [CGFloat] = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
         for (i, p) in steps.enumerated() {

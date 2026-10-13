@@ -1,60 +1,92 @@
+import AppKit
 import AVFoundation
-import CoreGraphics
+import CoreAudio
 import Foundation
-import ScreenCaptureKit
 
 enum CaptureError: Error, CustomStringConvertible {
-    case noDisplay
-    case screenRecordingDenied
     case noAudioSource
+    case systemAudioFailed(String)
+    case micFailed(String)
 
     var description: String {
         switch self {
-        case .noDisplay:
-            return "找不到可采集的显示器"
-        case .screenRecordingDenied:
-            return "没有屏幕录制权限"
         case .noAudioSource:
             return "系统声音和麦克风都没开，没得可听"
+        case .systemAudioFailed(let d):
+            return "系统声音起不来：\(d)"
+        case .micFailed(let d):
+            return "麦克风起不来：\(d)"
         }
     }
 }
 
 /// 两路音频采集：系统声音（对方）+ 麦克风（我）。
 ///
-/// 用一个 `SCStream` 同时开两路，比「AVAudioEngine 抓麦克风 + Core Audio Tap 抓
-/// 系统」省事得多，而且两路分开送来 —— **说话人标注是白送的**，不用做分离。
+/// 系统声音走 Core Audio 的 process tap，麦克风走 AVAudioEngine —— 两路天然
+/// 分开送来，**说话人标注是白送的**，不用做分离。
 ///
-/// 权限两样：
-///  - 屏幕录制：SCK 整体的门槛，没它麦克风那路也起不来（授权后要重启 app 才生效）
-///  - 麦克风：只收系统声音的话可以没有
-final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
+/// 为什么换掉了 SCK（原来两路都是它）：SCK 的流挂在显示器上，锁屏必断
+/// （-3815），开关窗口、插拔显示器也都在它的管辖范围里。tap 贴在音频层：
+/// 锁屏、开窗关窗、插拔显示器、换输出设备都不打断 —— `--taptest` 探针实测过
+/// （锁屏期间秒秒有帧、零中断），下面建 tap 的这段代码就是从那支探针搬来的。
+///
+/// 韧性（点名的场景都要活过）：
+///  - 锁屏 / 开窗关窗 / 插拔显示器 / 换输出设备：tap 够不着这些，天然免疫
+///  - 中途换麦克风（内置 ↔ 耳机）：系统会停掉引擎并发配置变更通知，收到就
+///    重挂重开（`restartMicEngine`），拔掉再插回来也会自己接上
+///
+/// 权限：
+///  - 系统声音：没有预检接口，第一次建 tap 时系统才弹「录制此电脑的音频」。
+///    拒绝不报错 —— tap 建得起来但一直是零帧，靠看门狗认出来（见 `watchdogTick`）
+///  - 麦克风：没有也能跑，只是听不见「我」
+final class AudioCapture {
 
     /// 每收到一帧回调一次。**在对应那路的采集队列上**，别在这里碰界面。
     private let onBuffer: (Speaker, AVAudioPCMBuffer) -> Void
-    /// 流被系统掐了（拔耳机、权限被撤……）
+    /// 采集被系统掐了。起不来的错在 start 里抛，这里管跑起来之后翻脸的
     private let onInterrupted: (Error) -> Void
+    /// 系统声音「有没有数据」的状态翻转（true = 来数据了）。不是故障提示 ——
+    /// 采不采集由 Listener 定，这里只报事实：跑了一段还一帧没有（多半是权限
+    /// 没给）报 false；后来开始有帧了报 true
+    private let onSystemAudioState: (Bool) -> Void
 
-    private var stream: SCStream?
     /// 每路一条串行队列：`Transcriber.feed` 里的重采样器不是线程安全的，
-    /// 同一条路的所有帧必须落在同一条队列上
+    /// 同一条路的所有帧必须落在同一条队列上（换设备重挂引擎后还是同一条，
+    /// 所以「录到一半换麦克风」不会把识别器弄乱）
     private let micQueue = DispatchQueue(label: "com.smarty.earshot.mic")
     private let systemQueue = DispatchQueue(label: "com.smarty.earshot.system")
+    /// 麦克风引擎的起停/重挂都在它上面串行做（配置变更通知从任意线程来）
+    private let engineQueue = DispatchQueue(label: "com.smarty.earshot.engine")
+    private let watchdogQueue = DispatchQueue(label: "com.smarty.earshot.watchdog")
+
+    // 系统声音：tap + 私有聚合设备
+    private var tapID = AudioObjectID(kAudioObjectUnknown)
+    private var aggID = AudioObjectID(kAudioObjectUnknown)
+    private var procID: AudioDeviceIOProcID?
+    private var systemEnabled = false
+    private var tapStartedAt: Date?
+    private let systemSignal = Signal()
+    private var systemMissingReported = false
+    private var watchdog: DispatchSourceTimer?
+
+    // 麦克风：AVAudioEngine
+    private var engine: AVAudioEngine?
+    private var micTapInstalled = false
+    private var micEnabled = false
+    private var micRestartAttempts = 0
+    private var configObserver: NSObjectProtocol?
 
     init(onBuffer: @escaping (Speaker, AVAudioPCMBuffer) -> Void,
-         onInterrupted: @escaping (Error) -> Void) {
+         onInterrupted: @escaping (Error) -> Void,
+         onSystemAudioState: @escaping (Bool) -> Void) {
         self.onBuffer = onBuffer
         self.onInterrupted = onInterrupted
+        self.onSystemAudioState = onSystemAudioState
     }
 
     // MARK: - 权限
 
-    static var screenRecordingGranted: Bool { CGPreflightScreenCaptureAccess() }
     static var micGranted: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
-
-    /// 弹「屏幕录制」授权（首次会跳系统设置；授权后要重启 app 才生效）
-    @discardableResult
-    static func requestScreenRecording() -> Bool { CGRequestScreenCaptureAccess() }
 
     /// 弹麦克风授权；已决定过就直接返回结果，不弹第二次
     static func requestMic() async -> Bool {
@@ -65,147 +97,330 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// 打开系统设置里能开关「录制电脑音频」的那一页。
+    ///
+    /// 系统声音没有 preflight / request 接口：权限只在第一次建 tap 时弹，
+    /// 错过了就只剩这一页能改。条目列在「屏幕与系统音频录制」里（macOS 15
+    /// 起改的名），跳转锚点还是老的 Privacy_ScreenCapture。
+    static func openAudioCaptureSettings() {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     // MARK: - 起停
 
     func start(captureSystem: Bool, captureMic: Bool) async throws {
-        guard CGPreflightScreenCaptureAccess() else { throw CaptureError.screenRecordingDenied }
         guard captureSystem || captureMic else { throw CaptureError.noAudioSource }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first else { throw CaptureError.noDisplay }
+        systemEnabled = captureSystem
+        if captureSystem { try startSystemTap() }
 
-        let cfg = SCStreamConfiguration()
-        cfg.capturesAudio = captureSystem
-        cfg.excludesCurrentProcessAudio = true    // 自己的提示音别录进去
-        cfg.sampleRate = 16000                    // 识别器要的就是 16k，先在这里降，后面少转一道
-        cfg.channelCount = 1
-        cfg.captureMicrophone = captureMic
-        // 只要音频。画面没有「关掉」的开关，就把尺寸给到最小、帧率压到 1fps，
-        // 代价小到可以忽略
-        cfg.width = 2
-        cfg.height = 2
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-        cfg.showsCursor = false
-        cfg.queueDepth = 3
-
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
-        if captureSystem {
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: systemQueue)
-        }
         if captureMic {
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: micQueue)
+            do {
+                try startMicEngine()
+                micEnabled = true
+            } catch {
+                // 麦克风起不来不拖垮系统声音：降级成单路（和「麦克风没授权」
+                // 一个待遇），日志里留痕；两路都指望它时才真起不来
+                if !captureSystem { throw error }
+                AppDebug.log("[capture] 麦克风起不来，降级只收系统声音：\(error)")
+            }
         }
-        try await stream.startCapture()
-        self.stream = stream
-        AppDebug.log("[capture] 已启动（系统 \(captureSystem ? "✓" : "✗")，麦克风 \(captureMic ? "✓" : "✗")）")
+        AppDebug.log("[capture] 已启动（系统 \(captureSystem ? "✓" : "✗")，麦克风 \(micEnabled ? "✓" : "✗")）")
     }
 
     func stop() async {
-        guard let stream else { return }
-        self.stream = nil
-        do {
-            try await stream.stopCapture()
-        } catch {
-            AppDebug.log("[capture] 停止时报错：\(error.localizedDescription)")
+        systemEnabled = false
+        micEnabled = false
+        watchdog?.cancel()
+        watchdog = nil
+        systemMissingReported = false
+
+        // 系统声音：拆除顺序和建的时候反过来（聚合设备引用着 tap）。
+        // 每一步都认「建成了没有」的账，半路 start 失败的状态也拆得干净
+        if let proc = procID {
+            AudioDeviceStop(aggID, proc)
+            AudioDeviceDestroyIOProcID(aggID, proc)
+            procID = nil
+        }
+        if aggID != kAudioObjectUnknown {
+            AudioHardwareDestroyAggregateDevice(aggID)
+            aggID = kAudioObjectUnknown
+        }
+        if tapID != kAudioObjectUnknown {
+            AudioHardwareDestroyProcessTap(tapID)
+            tapID = kAudioObjectUnknown
+        }
+
+        // 麦克风
+        if let obs = configObserver {
+            NotificationCenter.default.removeObserver(obs)
+            configObserver = nil
+        }
+        if let e = engine {
+            e.stop()
+            if micTapInstalled {
+                e.inputNode.removeTap(onBus: 0)
+                micTapInstalled = false
+            }
+            engine = nil
         }
         AppDebug.log("[capture] 已停止")
     }
 
-    // MARK: - SCStream 回调（都在采集队列上）
+    // MARK: - 系统声音：process tap + 私有聚合设备（--taptest 探针同源的代码）
 
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-                of type: SCStreamOutputType) {
-        let speaker: Speaker
-        switch type {
-        case .microphone: speaker = .me
-        case .audio:      speaker = .other
-        default:          return          // 画面帧，直接丢
+    private func startSystemTap() throws {
+        var exclude: [AudioObjectID] = []
+        if let own = Self.ownProcessObject() {
+            exclude = [own]      // 自己的提示音别录进去
         }
-        guard let buffer = Self.pcmBuffer(from: sampleBuffer) else { return }
-        onBuffer(speaker, buffer)
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: exclude)
+        desc.name = "耳录"
+        desc.isPrivate = true
+        desc.muteBehavior = .unmuted     // 采归采，别把用户的系统声音掐了
+
+        var tap = AudioObjectID(kAudioObjectUnknown)
+        var st = AudioHardwareCreateProcessTap(desc, &tap)
+        guard st == noErr else {
+            throw CaptureError.systemAudioFailed("建 tap 失败（OSStatus \(st)）")
+        }
+        tapID = tap
+
+        // tap 出来的格式：探针实测 48k · 2 声道 · Float32 交织，但不写死，按它报的来
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var fmtAddr = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyFormat,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        st = AudioObjectGetPropertyData(tapID, &fmtAddr, 0, nil, &size, &asbd)
+        guard st == noErr, asbd.mFormatID == kAudioFormatLinearPCM,
+              asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+              asbd.mBitsPerChannel == 32,
+              let format = AVAudioFormat(streamDescription: &asbd) else {
+            throw CaptureError.systemAudioFailed("tap 格式拿不到或不是 Float32（OSStatus \(st)）")
+        }
+
+        // 私有聚合设备把 tap 接出来（不挂任何真实设备，只当 tap 的取帧口）
+        let aggDict: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "耳录",
+            kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceSubDeviceListKey: [],
+            kAudioAggregateDeviceTapListKey: [
+                [kAudioSubTapUIDKey: desc.uuid.uuidString,
+                 kAudioSubTapDriftCompensationKey: true],
+            ],
+        ]
+        var agg = AudioObjectID(kAudioObjectUnknown)
+        st = AudioHardwareCreateAggregateDevice(aggDict as CFDictionary, &agg)
+        guard st == noErr else {
+            throw CaptureError.systemAudioFailed("建聚合设备失败（OSStatus \(st)）")
+        }
+        aggID = agg
+
+        // IO 回调（实时线程）：只做两件事 —— 记下「有帧来了」，把帧拷一份丢到
+        // systemQueue 上喂识别器。重采样那种耗时活不在这里做
+        var proc: AudioDeviceIOProcID?
+        st = AudioDeviceCreateIOProcIDWithBlock(&proc, aggID, nil) { [weak self] _, inputData, _, _, _ in
+            guard let self else { return }
+            guard let buffer = Self.pcmBuffer(fromIOProc: inputData, format: format),
+                  buffer.frameLength > 0 else { return }
+            self.systemSignal.note()
+            self.systemQueue.async { self.onBuffer(.other, buffer) }
+        }
+        guard st == noErr, let proc else {
+            throw CaptureError.systemAudioFailed("挂 IO 回调失败（OSStatus \(st)）")
+        }
+        procID = proc
+
+        st = AudioDeviceStart(aggID, proc)
+        guard st == noErr else {
+            throw CaptureError.systemAudioFailed("聚合设备起不来（OSStatus \(st)）")
+        }
+
+        // 看门狗：「建了 tap 却一帧都没来」= 多半没给权限。从这一刻起计时
+        tapStartedAt = Date()
+        systemMissingReported = false
+        systemSignal.clear()
+        startWatchdog()
     }
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        AppDebug.log("[capture] 流被中断：\(error.localizedDescription)")
-        onInterrupted(error)
+    private func startWatchdog() {
+        watchdog?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: watchdogQueue)
+        t.schedule(deadline: .now() + 1, repeating: 1)
+        t.setEventHandler { [weak self] in self?.watchdogTick() }
+        watchdog = t
+        t.resume()
     }
 
-    /// CMSampleBuffer → AVAudioPCMBuffer。拷一份再走 —— SCK 的 sample buffer
-    /// 出了这个回调就可能被回收，而我们要把它带到别的队列上去重采样。
+    /// 每秒看一眼系统声音有没有来过帧。
     ///
-    /// 不用 `CMSampleBufferCopyPCMDataIntoAudioBufferList`：SCK 的音频帧在它
-    /// 上面必报 -12731（RequiredParameterMissing），一帧都取不出来。改成
-    /// 「量大小 → 拿 AudioBufferList（连着 block buffer 一起保着）→ 自己按块
-    /// memcpy」，这是取 sample buffer 里 PCM 数据的正路。
-    ///
-    /// 非 private 是给 `--pcmtest` 自检用（合成 SCK 形状的帧跑一遍）。
-    static func pcmBuffer(from sb: CMSampleBuffer) -> AVAudioPCMBuffer? {
-        guard CMSampleBufferDataIsReady(sb),
-              let fd = CMSampleBufferGetFormatDescription(sb),
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd),
-              let format = AVAudioFormat(streamDescription: asbd) else { return nil }
+    /// 「拒绝了权限」在 tap 这条路上不报错：tap 建得出来、回调也在跑，只是
+    /// 一直是零帧 —— 只能靠「一帧都没来过」认出来。8 秒是个折中：权限窗上
+    /// 犹豫一会儿不会误报，真没给也不用干等。误报也不伤：来数据了会立刻
+    /// 翻回 true（权限窗上现点的「允许」也算），提示自己就收掉了
+    private func watchdogTick() {
+        guard systemEnabled, let startedAt = tapStartedAt else { return }
+        if systemSignal.hasData {
+            if systemMissingReported {
+                systemMissingReported = false
+                AppDebug.log("[capture] 系统声音来数据了")
+                onSystemAudioState(true)
+            }
+            return
+        }
+        guard !systemMissingReported, Date().timeIntervalSince(startedAt) >= 8 else { return }
+        systemMissingReported = true
+        AppDebug.log("[capture] tap 跑了 8 秒一帧都没来 —— 多半是「录制电脑音频」权限没给")
+        onSystemAudioState(false)
+    }
 
-        let frames = CMSampleBufferGetNumSamples(sb)
+    // MARK: - 格式转换
+
+    /// IO 回调的 AudioBufferList → AVAudioPCMBuffer。**拷一份再走** ——
+    /// 回调的 buffer 出了这次调用就还给系统了，而帧要带去别的队列上重采样。
+    ///
+    /// 非 private 是给 `--pcmtest` 自检用：造一块同形状的 ABL 跑一遍。
+    static func pcmBuffer(fromIOProc abl: UnsafePointer<AudioBufferList>,
+                          format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let src = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
+        guard src.count > 0 else { return nil }
+
+        // 帧数 = 每块字节数 ÷ 每帧字节数。交织时一块装全部声道；非交织时
+        // mBytesPerFrame 报的是单声道一帧的字节数，除出来的同样是帧数
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        guard bytesPerFrame > 0 else { return nil }
+        let frames = Int(src[0].mDataByteSize) / bytesPerFrame
         guard frames > 0,
               let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))
         else { return nil }
 
-        // 先空手问一句「要多大」：AudioBufferList 的实际块数由声道布局决定
-        var needed = 0
-        var status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sb, bufferListSizeNeededOut: &needed,
-            bufferListOut: nil, bufferListSize: 0,
-            blockBufferAllocator: kCFAllocatorDefault,
-            blockBufferMemoryAllocator: kCFAllocatorDefault,
-            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-            blockBufferOut: nil)
-        guard status == noErr, needed > 0 else {
-            AppDebug.log("[capture] 量 AudioBufferList 大小失败：OSStatus \(status)")
+        let dst = UnsafeMutableAudioBufferListPointer(out.mutableAudioBufferList)
+        guard src.count == dst.count else {
+            AppDebug.log("[capture] 声道布局对不上：源 \(src.count) 块 / 目标 \(dst.count) 块")
             return nil
         }
-
-        let raw = UnsafeMutableRawPointer.allocate(byteCount: needed, alignment: 16)
-        defer { raw.deallocate() }
-        let list = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
-        var block: CMBlockBuffer?
-        status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sb, bufferListSizeNeededOut: nil,
-            bufferListOut: list, bufferListSize: needed,
-            blockBufferAllocator: kCFAllocatorDefault,
-            blockBufferMemoryAllocator: kCFAllocatorDefault,
-            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-            blockBufferOut: &block)
-        guard status == noErr else {
-            AppDebug.log("[capture] 取 AudioBufferList 失败：OSStatus \(status)")
-            return nil
+        // 先置 frameLength：不置的话目标 ABL 的 mDataByteSize 全是 0（--pcmtest
+        // 踩过这个坑），字节数照格式自己算，不赌它报得对不对
+        out.frameLength = AVAudioFrameCount(frames)
+        let perBuffer = bytesPerFrame * frames
+        for i in 0..<src.count {
+            guard let s = src[i].mData, let d = dst[i].mData else { return nil }
+            let n = min(Int(src[i].mDataByteSize), perBuffer)
+            memcpy(d, s, n)
+            dst[i].mDataByteSize = UInt32(n)
         }
+        return out
+    }
 
-        // list 里各块的 mData 指的就是 block 的内存 —— 拷贝全程都得保着它，
-        // 少了 withExtendedLifetime，ARC 提前放掉 block 就是一个悬垂指针
-        return withExtendedLifetime(block) { () -> AVAudioPCMBuffer? in
-            let src = UnsafeMutableAudioBufferListPointer(list)
-            let dst = UnsafeMutableAudioBufferListPointer(out.mutableAudioBufferList)
-            guard src.count == dst.count, src.count > 0 else {
-                AppDebug.log("[capture] 声道布局对不上：源 \(src.count) 块 / 目标 \(dst.count) 块")
-                return nil
-            }
-            // 三个坑连在一起，都是自检（--pcmtest）一个一个踩出来的：
-            //  1. 目标 ABL 的 mDataByteSize 是跟着 frameLength 报的 —— 不先置
-            //     frameLength，两个都是 0，min() 算出「拷 0 字节」，白拷
-            //  2. 所以先把 frameLength 置上
-            //  3. 字节数照格式自己算（每块 = 每帧字节数 × 帧数，交织/非交织都成立），
-            //     不赌它报得对不对
-            out.frameLength = AVAudioFrameCount(frames)
-            let perBuffer = Int(format.streamDescription.pointee.mBytesPerFrame) * frames
-            for i in 0..<src.count {
-                guard let s = src[i].mData, let d = dst[i].mData else { return nil }
-                let n = min(Int(src[i].mDataByteSize), perBuffer)
-                memcpy(d, s, n)
-                dst[i].mDataByteSize = UInt32(n)
-            }
-            return out
+    /// 拷一份 AVAudioPCMBuffer。引擎 tap 给的 buffer 出了回调就作废（会被
+    /// 复用），帧要带去别的队列上重采样 —— 必须自己拷
+    private static func copyOf(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard buffer.frameLength > 0,
+              let out = AVAudioPCMBuffer(pcmFormat: buffer.format,
+                                         frameCapacity: buffer.frameLength) else { return nil }
+        out.frameLength = buffer.frameLength
+        let src = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let dst = UnsafeMutableAudioBufferListPointer(out.mutableAudioBufferList)
+        guard src.count == dst.count else { return nil }
+        for i in 0..<src.count {
+            guard let s = src[i].mData, let d = dst[i].mData else { return nil }
+            let n = min(Int(src[i].mDataByteSize), Int(dst[i].mDataByteSize))
+            memcpy(d, s, n)
+            dst[i].mDataByteSize = UInt32(n)
         }
+        return out
+    }
+
+    // MARK: - 麦克风：AVAudioEngine
+
+    private func startMicEngine() throws {
+        let e = AVAudioEngine()
+        try attachMicTap(to: e)
+        engine = e
+
+        // 配置变更通知（object 钉死自己的引擎）：系统换默认输入设备（插拔耳机、
+        // 设置里换麦克风）时引擎会被停掉并发这条 —— 重挂重开，这就是「录到一半
+        // 换麦克风」能活下来的全部秘密。通知从任意线程来，统一收进 engineQueue
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: e, queue: nil) { [weak self] _ in
+                self?.engineQueue.async { self?.restartMicEngine() }
+            }
+    }
+
+    /// 挂输入 tap 并启动引擎。格式按当前输入设备读 —— 换设备后格式可能变，
+    /// 所以重挂时整个重来
+    private func attachMicTap(to e: AVAudioEngine) throws {
+        let input = e.inputNode
+        let format = input.inputFormat(forBus: 0)
+        // 没有可用输入设备时格式是 0，硬挂 tap 会直接崩 —— 先挡在这里
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw CaptureError.micFailed("没有可用的输入设备")
+        }
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self, let copy = Self.copyOf(buffer) else { return }
+            self.micQueue.async { self.onBuffer(.me, copy) }
+        }
+        micTapInstalled = true
+        e.prepare()
+        try e.start()
+    }
+
+    /// 配置变更后重挂重开。系统换输入设备时引擎被停掉，老 tap 连的还是老设备
+    /// —— 把 tap 摘了，按新设备格式重挂、再开。
+    ///
+    /// 偶尔会撞上「新设备还没稳」（格式读到 0、或 start 抛错 —— 插拔耳机本身
+    /// 就要几秒），那就隔 0.5 秒再试，十次为止；放弃也不中断监听 —— 麦克风
+    /// 死了声纹和识别自己看得出来，系统声音那路不受影响
+    private func restartMicEngine() {
+        guard micEnabled, let e = engine else { return }
+        e.stop()
+        if micTapInstalled {
+            e.inputNode.removeTap(onBus: 0)
+            micTapInstalled = false
+        }
+        do {
+            try attachMicTap(to: e)
+            micRestartAttempts = 0
+            AppDebug.log("[capture] 换设备后麦克风已重挂：\(e.inputNode.inputFormat(forBus: 0))")
+        } catch {
+            micRestartAttempts += 1
+            guard micRestartAttempts <= 10 else {
+                AppDebug.log("[capture] 麦克风重挂失败太多次，这轮放弃：\(error)")
+                return
+            }
+            AppDebug.log("[capture] 麦克风重挂没成（第 \(micRestartAttempts) 次）：\(error)，0.5 秒后再试")
+            engineQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.restartMicEngine() }
+        }
+    }
+
+    // MARK: - 小件
+
+    /// 自己的 AudioObjectID，用来从 tap 里排除（PID → process object 是 Core Audio 的官方翻译）
+    private static func ownProcessObject() -> AudioObjectID? {
+        var pid = getpid()
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var proc = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let st = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr,
+                                            UInt32(MemoryLayout<pid_t>.size), &pid, &size, &proc)
+        return st == noErr && proc != kAudioObjectUnknown ? proc : nil
+    }
+
+    /// IO 回调（实时线程）写、看门狗（另一个队列）读 —— 一个小锁隔着
+    private final class Signal {
+        private let lock = NSLock()
+        private var got = false
+        func note() { lock.lock(); got = true; lock.unlock() }
+        func clear() { lock.lock(); got = false; lock.unlock() }
+        var hasData: Bool { lock.lock(); defer { lock.unlock() }; return got }
     }
 }
 
@@ -213,22 +428,15 @@ final class AudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
 /// 采集 + 识别联跑：`EarShot --capture [秒数] [--verbose]`
 ///
-/// 这个必须要屏幕录制权限（+麦克风），所以**不代表能免权限跑**；没授权时
-/// 就把现状和怎么办打出来，不弹窗、不假装成功。
+/// 要权限才听得到东西，所以**不代表能免权限跑**；现状和怎么办都打出来，
+/// 不弹窗、不假装成功。注意系统声音那路从终端直跑测不到（TCC 把责任进程
+/// 算在终端头上，终端没有音频采集权限说明键）—— 要验它得用真 app 试听。
 enum CaptureSelfCheck {
 
     static func run(seconds: Double, verbose: Bool) async -> Int32 {
-        print("屏幕录制：" + (AudioCapture.screenRecordingGranted ? "✓ 已授权" : "✗ 未授权（采集合流的前置；授权后要重启 app）"))
         print("麦克风　：" + (AudioCapture.micGranted ? "✓ 已授权" : "✗ 未授权（只收系统声音的话可以不授）"))
-        guard AudioCapture.screenRecordingGranted else {
-            print("""
-
-            没有屏幕录制权限，采不起来。两种给法：
-              · 开监听时在面板里点「去授权」，或者
-              · 系统设置 → 隐私与安全性 → 屏幕录制 → 打开 EarShot（再重启 app）
-            """)
-            return 2
-        }
+        print("系统声音：没有预检接口 —— 第一次建 tap 时才弹权限窗。"
+              + "从终端直跑时系统声音收不到（TCC 把责任算在终端头上），要验它用 `make taptest`")
 
         let locale = Locale(identifier: "zh-CN")
         let mic: Transcriber?
@@ -255,7 +463,12 @@ enum CaptureSelfCheck {
             case .me:    mic?.feed(buffer)
             case .other: sys?.feed(buffer)
             }
-        }, onInterrupted: { _ in })
+        }, onInterrupted: { _ in }, onSystemAudioState: { alive in
+            print(alive
+                  ? "（系统声音：来数据了）"
+                  : "（系统声音：8 秒了还没帧 —— 没给权限，或者就是终端直跑，见上面那条）")
+            fflush(stdout)
+        })
 
         do {
             try await capture.start(captureSystem: true, captureMic: mic != nil)
@@ -291,178 +504,101 @@ enum CaptureSelfCheck {
 
 // MARK: - PCM 转换自检
 
-/// CMSampleBuffer → AVAudioPCMBuffer 转换自检：`EarShot --pcmtest`
+/// AudioBufferList → AVAudioPCMBuffer 转换自检：`EarShot --pcmtest`
 ///
-/// 合成一个「形状和 ScreenCaptureKit 送出来的一样」的音频帧（16k / Int16 /
-/// 数据装在 block buffer 里），走一遍真正在用的转换函数，逐字节核对。
+/// 造一块「形状和 Core Audio tap 送出来的一样」的 ABL（48k · 立体声 ·
+/// Float32，交织 / 非交织各一块），走一遍真正在用的转换函数，逐字节核对。
 ///
 /// 为什么要有它：这段转换是采集链路上唯一不能靠音频文件自检覆盖的一段
 /// （`--transcribe` 绕过了它），只能等真人授权、说话、再看日志 ——
-/// -12731 那一轮就是这么白白烧掉一次授权的。
+/// 上一代采集（SCK 那条路）就在这里白烧过一整轮授权。
 enum PcmSelfCheck {
 
     static func run() -> Int32 {
         var failed = 0
-        for (label, channels) in [("单声道（采集就是这个形状）", 1), ("立体声（兜底形状）", 2)] {
-            if !check(channels: channels, label: label) { failed += 1 }
-        }
+        if !check(label: "交织（tap 就是这个形状）", interleaved: true) { failed += 1 }
+        if !check(label: "非交织（兜底形状）", interleaved: false) { failed += 1 }
         print(failed == 0 ? "PCM 转换自检全部通过" : "PCM 转换自检有 \(failed) 项没过")
         return failed == 0 ? 0 : 1
     }
 
-    /// 造帧 → 转换 → 核对帧数、格式、字节
-    private static func check(channels: Int, label: String) -> Bool {
-        let frames = 1600                       // 100ms @16k
-        let bytesPerFrame = 2 * channels        // Int16 交织
-        let bytes = frames * bytesPerFrame
+    /// 造源数据 → 包成 ABL → 过转换函数 → 核对帧数、格式、逐字节内容
+    private static func check(label: String, interleaved: Bool) -> Bool {
+        let sampleRate = 48000.0
+        let channels = 2
+        let frames = 4800                      // 100ms @48k
+        let bufferCount = interleaved ? 1 : channels
+        let floatsPerBuffer = frames * (interleaved ? channels : 1)
+        let bytesPerFrame = interleaved ? 4 * channels : 4
 
-        // 内容乱但确定，必须原样回来
-        var src = [Int16](repeating: 0, count: frames * channels)
-        for i in src.indices { src[i] = Int16(truncatingIfNeeded: i &* 7919 % 8192 - 4096) }
+        // 源数据：确定但看着乱，必须原样回来
+        let srcs: [[Float]] = (0..<bufferCount).map { b in
+            (0..<floatsPerBuffer).map { i in
+                Float((b * 100_003 + i * 7919) % 8192 - 4096) / 4096
+            }
+        }
+
+        // ABL 的 AudioBuffer 数组是变长的：多出来的槽位跟着第一个走，申请够
+        // 字节数、把 count 置上，此后统一用 UnsafeMutableAudioBufferListPointer
+        let listSize = MemoryLayout<AudioBufferList>.size
+            + (bufferCount - 1) * MemoryLayout<AudioBuffer>.size
+        let rawList = UnsafeMutableRawPointer.allocate(byteCount: listSize, alignment: 16)
+        defer { rawList.deallocate() }
+        let abl = UnsafeMutableAudioBufferListPointer(rawList.assumingMemoryBound(to: AudioBufferList.self))
+        abl.count = bufferCount
+        var keepAlive: [UnsafeMutableRawPointer] = []
+        defer { keepAlive.forEach { $0.deallocate() } }
+        for b in 0..<bufferCount {
+            let data = UnsafeMutableRawPointer.allocate(byteCount: floatsPerBuffer * 4, alignment: 16)
+            keepAlive.append(data)
+            srcs[b].withUnsafeBytes { _ = memcpy(data, $0.baseAddress!, floatsPerBuffer * 4) }
+            abl[b] = AudioBuffer(mNumberChannels: UInt32(interleaved ? channels : 1),
+                                 mDataByteSize: UInt32(floatsPerBuffer * 4),
+                                 mData: data)
+        }
 
         var asbd = AudioStreamBasicDescription(
-            mSampleRate: 16000,
+            mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+                | (interleaved ? 0 : kAudioFormatFlagIsNonInterleaved),
             mBytesPerPacket: UInt32(bytesPerFrame),
             mFramesPerPacket: 1,
             mBytesPerFrame: UInt32(bytesPerFrame),
             mChannelsPerFrame: UInt32(channels),
-            mBitsPerChannel: 16,
+            mBitsPerChannel: 32,
             mReserved: 0)
-
-        guard let sb = makeSampleBuffer(asbd: &asbd, byteCount: bytes, fill: { ptr in
-            src.withUnsafeBytes { _ = memcpy(ptr, $0.baseAddress!, bytes) }
-        }) else {
-            print("✗ \(label)：造不出测试帧")
+        guard let format = AVAudioFormat(streamDescription: &asbd) else {
+            print("✗ \(label)：格式搭不出来")
             return false
         }
 
-        guard let out = AudioCapture.pcmBuffer(from: sb) else {
+        guard let out = AudioCapture.pcmBuffer(fromIOProc: UnsafePointer(abl.unsafeMutablePointer),
+                                               format: format) else {
             print("✗ \(label)：转换返回 nil")
             return false
         }
         guard Int(out.frameLength) == frames,
-              out.format.sampleRate == 16000,
+              out.format.sampleRate == sampleRate,
               out.format.channelCount == AVAudioChannelCount(channels) else {
             print("✗ \(label)：帧数/格式不对 —— \(out.frameLength) 帧 \(out.format)")
             return false
         }
-        guard let p = out.int16ChannelData?[0] else {
-            print("✗ \(label)：转出来的 buffer 拿不到 Int16 指针")
-            return false
-        }
-        if memcmp(p, src, bytes) != 0 {
-            let bad = (0..<src.count).first { p[$0] != src[$0] } ?? -1
-            print("✗ \(label)：PCM 不一致，第一处 #\(bad)"
-                  + " 期望 \(bad >= 0 ? src[bad] : -1) / 实际 \(bad >= 0 ? p[bad] : -1)")
-            print("   实际前 8：" + (0..<8).map { "\(p[$0])" }.joined(separator: ","))
-            print("   期望前 8：" + (0..<8).map { "\(src[$0])" }.joined(separator: ","))
-            dumpSourceABL(sb)
+        guard let dst = out.floatChannelData else {
+            print("✗ \(label)：转出来的 buffer 拿不到 Float 指针")
             return false
         }
 
-        // 记账：线上那个 -12731 是老 API 的锅。合成帧上它复不复现都打印出来，
-        // 复现了说明这块合成帧是个忠实的替身，不复现也不是问题（新路不靠它）
-        if let probe = AVAudioPCMBuffer(pcmFormat: out.format,
-                                        frameCapacity: AVAudioFrameCount(frames)) {
-            let st = CMSampleBufferCopyPCMDataIntoAudioBufferList(
-                sb, at: 0, frameCount: Int32(frames), into: probe.mutableAudioBufferList)
-            print("  （对照）老 API CopyPCMDataIntoAudioBufferList → OSStatus \(st)")
-        }
-        print("✓ \(label)：\(frames) 帧 / \(bytes) 字节原样转换")
-        return true
-    }
-
-    /// 诊断用：同样「量大小 → 取 ABL」，直接看源帧里到底有没有数据
-    private static func dumpSourceABL(_ sb: CMSampleBuffer) {
-        var need = 0
-        _ = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sb, bufferListSizeNeededOut: &need,
-            bufferListOut: nil, bufferListSize: 0,
-            blockBufferAllocator: kCFAllocatorDefault,
-            blockBufferMemoryAllocator: kCFAllocatorDefault,
-            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-            blockBufferOut: nil)
-        let raw = UnsafeMutableRawPointer.allocate(byteCount: max(need, 16), alignment: 16)
-        defer { raw.deallocate() }
-        let list = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
-        var blk: CMBlockBuffer?
-        let st = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sb, bufferListSizeNeededOut: nil,
-            bufferListOut: list, bufferListSize: max(need, 16),
-            blockBufferAllocator: kCFAllocatorDefault,
-            blockBufferMemoryAllocator: kCFAllocatorDefault,
-            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-            blockBufferOut: &blk)
-        let abl = UnsafeMutableAudioBufferListPointer(list)
-        print("  [诊断] need=\(need) OSStatus=\(st) 块数=\(abl.count)")
-        withExtendedLifetime(blk) {
-            for i in 0..<abl.count {
-                if let m = abl[i].mData {
-                    let a = m.load(as: Int16.self)
-                    let b = m.load(fromByteOffset: 2, as: Int16.self)
-                    print("  [诊断] 源块\(i)：\(abl[i].mDataByteSize) 字节，头两个 Int16 = \(a), \(b)")
-                } else {
-                    print("  [诊断] 源块\(i)：mData 空")
-                }
+        // 逐字节比：交织版只有一块（floatChannelData[0] 就是交织基址），
+        // 非交织版每条声道各一块
+        for b in 0..<bufferCount {
+            let got = dst[interleaved ? 0 : b]
+            for i in 0..<floatsPerBuffer where got[i] != srcs[b][i] {
+                print("✗ \(label)：PCM 不一致，块\(b) 第 \(i) 个：期望 \(srcs[b][i]) / 实际 \(got[i])")
+                return false
             }
         }
-    }
-
-    /// 按 CoreMedia 的正规路子造一帧音频：block buffer 装数据 + 音频格式说明
-    private static func makeSampleBuffer(asbd: inout AudioStreamBasicDescription,
-                                         byteCount: Int,
-                                         fill: (UnsafeMutableRawPointer) -> Void) -> CMSampleBuffer? {
-        var fd: CMAudioFormatDescription?
-        let stFd = CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: &asbd,
-                                                  layoutSize: 0, layout: nil,
-                                                  magicCookieSize: 0, magicCookie: nil,
-                                                  extensions: nil, formatDescriptionOut: &fd)
-        guard stFd == noErr, let fd else {
-            print("  造帧失败：格式说明 OSStatus \(stFd)")
-            return nil
-        }
-
-        var block: CMBlockBuffer?
-        let stBlock = CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault,
-                                                         memoryBlock: nil, blockLength: byteCount,
-                                                         blockAllocator: kCFAllocatorDefault,
-                                                         customBlockSource: nil,
-                                                         offsetToData: 0, dataLength: byteCount,
-                                                         flags: 0, blockBufferOut: &block)
-        guard stBlock == noErr, let block else {
-            print("  造帧失败：block buffer OSStatus \(stBlock)")
-            return nil
-        }
-
-        // memoryBlock 给 nil 造出来的 buffer 是「待分配」的，先让它把内存要下来
-        let stAssure = CMBlockBufferAssureBlockMemory(block)
-        guard stAssure == noErr else {
-            print("  造帧失败：block buffer 申请内存 OSStatus \(stAssure)")
-            return nil
-        }
-
-        var dataPtr: UnsafeMutablePointer<CChar>?
-        let stPtr = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil,
-                                                totalLengthOut: nil, dataPointerOut: &dataPtr)
-        guard stPtr == noErr, let dataPtr else {
-            print("  造帧失败：取数据指针 OSStatus \(stPtr)")
-            return nil
-        }
-        fill(UnsafeMutableRawPointer(dataPtr))
-
-        var sb: CMSampleBuffer?
-        let stSb = CMSampleBufferCreateReady(allocator: kCFAllocatorDefault,
-                                             dataBuffer: block, formatDescription: fd,
-                                             sampleCount: byteCount / Int(asbd.mBytesPerFrame),
-                                             sampleTimingEntryCount: 0, sampleTimingArray: nil,
-                                             sampleSizeEntryCount: 0, sampleSizeArray: nil,
-                                             sampleBufferOut: &sb)
-        guard stSb == noErr, let sb else {
-            print("  造帧失败：sample buffer OSStatus \(stSb)")
-            return nil
-        }
-        return sb
+        print("✓ \(label)：\(frames) 帧 × \(channels) 声道原样转换（\(floatsPerBuffer * 4 * bufferCount) 字节）")
+        return true
     }
 }

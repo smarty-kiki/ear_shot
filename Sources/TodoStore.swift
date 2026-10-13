@@ -139,13 +139,13 @@ enum ProblemAction: Equatable {
     /// 打开设置窗口（没配 API Key 时）—— 填 key 的正路是设置框，
     /// 配置文件还留着，但降级成逃生舱，不再是按钮指向的地方
     case openSettings
-    /// 弹系统「屏幕录制」授权（没授权时）
-    case grantScreenRecording
+    /// 打开系统设置里「录制电脑音频」的开关页（没授权时）
+    case grantAudioCapture
 
     var title: String {
         switch self {
-        case .openSettings:         return "去设置"
-        case .grantScreenRecording: return "去授权"
+        case .openSettings:        return "去设置"
+        case .grantAudioCapture:   return "去授权"
         }
     }
 }
