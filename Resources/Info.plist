@@ -29,6 +29,14 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 
+	<!-- 自动更新：appcast 是 GitHub 最新 Release 的资产；公钥由 Sparkle generate_keys 生成 -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/smarty-kiki/ear_shot/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>nhvGfiRJwH8MKXH6NP5npRfRN18Rakq+o+KNI2mJsVo=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+
 	<!-- 麦克风：抓「我」说的话 -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>耳录需要麦克风来听清你说的话，从中整理出待办事项。音频只在本机识别，不会上传。</string>

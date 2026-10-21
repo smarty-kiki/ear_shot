@@ -4,6 +4,9 @@ dist/
 release/
 *.dmg
 
+# 固定版本 Sparkle（scripts/fetch-sparkle.sh 下载，不进 git）
+.sparkle/
+
 # Xcode / Swift
 *.xcuserstate
 xcuserdata/

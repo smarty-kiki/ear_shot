@@ -47,6 +47,8 @@
 3. 本应用没做苹果公证，在别的电脑上第一次打开会被系统拦一下：**右键点图标 → 打开 → 再点「打开」**，做一次就行
 4. 想核对下载有没有损坏（可选）：`shasum -a 256 -c EarShot-<版本>.dmg.sha256`
 
+装好之后会**自动检查更新**：有新版本会弹窗，确认后下载安装。菜单里也有「检查更新…」可以随时手动查。如果你之前装过旧版，第一次升到**带更新器的版本**时，还得手动下载覆盖安装一次；之后就能自动升级了。
+
 **第一次用**：
 
 1. 点面板底栏的「设置」，填一个 [DeepSeek](https://platform.deepseek.com) 的 API Key（要自己申请；每次分析只花几百个 token，很便宜），点「测试连接」确认能用
@@ -130,12 +132,14 @@
 make build          # 构建到 dist/EarShot.app
 make run            # 构建并启动
 make test           # 离线自检全套（不需要权限、不需要 key）
-make dmg            # 打包发布 DMG 到 release/
+make dmg            # 打包发布 DMG + appcast 到 release/
 ```
 
 首次运行的两个权限见上面「[安装](#安装)」。开发提示：本地构建默认用临时签名，重新构建一次签名就换一次，录电脑音频的授权可能因此失效、要重新授权。把产物固定放在 `~/Applications` 或 `/Applications` 再授权，能少很多反复弹窗；想一劳永逸：用固定签名身份构建（`CODESIGN_IDENTITY="<证书名>" ./build.sh`，自签证书就行）—— 权限认的是签名身份，重建就不用重来。
 
-分支约定、提交前自检、不能碰的红线都在 [CONTRIBUTING.md](CONTRIBUTING.md)；打包发布用 `release.sh`（`make publish` 一键发 GitHub Release）。
+构建时会从 GitHub 下载固定版本的 Sparkle 2.10.0 到 `.sparkle/`（不进 git，下载脚本里钉了 SHA256）。离线或已经有解压目录时，可以 `SPARKLE_DIR=/path/to/sparkle ./build.sh` 跳过下载。
+
+分支约定、提交前自检、不能碰的红线都在 [CONTRIBUTING.md](CONTRIBUTING.md)；打包发布用 `release.sh`（`make publish` 一键发 DMG + appcast 到 GitHub Release）。
 
 ## 自检命令
 
@@ -173,7 +177,7 @@ Core Audio tap（对方）+ AVAudioEngine（我）—— 两边分开 = 谁说�
 - `Sources/Listener.swift` 是总控：权限、模型下载、分析节奏、出错提示都收在里面，界面只负责把数据画出来。
 - 什么时候把新听到的文字发去分析，按句子收尾方式分三档：句号/问号/叹号收尾的直接发；逗号/省略号收尾的等 `debounceSeconds`；一直没标点的等 `maxStalenessSeconds`；任何新句子进来都把等待重新计时。另外两次分析之间有最小间隔兜底；失败会自动重试（只有成功才推进进度）。
 - 停止监听会先停采集再停识别器，收工前补分析一次（退出程序时跳过，不拖慢退出）。
-- 脚本：`build.sh` 构建、`run.sh` 构建并启动、`release.sh` 打包 DMG（`make publish` 发 GitHub Release）；分支与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 脚本：`build.sh` 构建、`run.sh` 构建并启动、`release.sh` 打包 DMG + appcast（`make publish` 发 GitHub Release）；分支与发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 目录结构
 
@@ -196,6 +200,8 @@ Sources/
   SoundPlayer.swift  提示音
 tools/
   make-icon.swift    应用图标（代码画的，--install 出 Resources/AppIcon.icns）
+scripts/
+  fetch-sparkle.sh   下载固定版本的 Sparkle（校验 SHA256，缓存到 .sparkle/）
 ```
 
 ## 已知限制
