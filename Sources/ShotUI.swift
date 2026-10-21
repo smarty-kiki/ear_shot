@@ -552,9 +552,9 @@ private struct SideTab: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            // 录制指示：监听中红点慢闪，停下来是灰点常亮
+            // 录制指示：监听中红点慢闪，停下来是白点常亮
             Circle()
-                .fill(listening ? AlertLevel.listening.color : Color(white: 0.30))
+                .fill(listening ? AlertLevel.listening.color : Color.white)
                 .frame(width: 8, height: 8)
                 .opacity(listening ? (pulsing ? 1.0 : 0.25) : 1.0)
 
@@ -562,7 +562,7 @@ private struct SideTab: View {
                 AlertDot(level: level, count: count, pulsing: pulsing)
             } else {
                 Capsule()
-                    .fill(Color(white: 0.30))
+                    .fill(Color.white)
                     .frame(width: 3.5, height: 16)
             }
         }
