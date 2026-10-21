@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import Combine
 import SwiftUI
+import Sparkle
 
 // MARK: - 控制器
 
@@ -520,12 +521,14 @@ final class EarShotController {
 
 // MARK: - AppDelegate
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var controller: EarShotController!
     private var listener: Listener!
     private var statusItem: NSStatusItem?
     private var settingsWindow: SettingsWindowController!
+    private var updaterController: SPUStandardUpdaterController?
 
     /// `--seed N`：塞 N 条假待办，用来在真窗口里验滚动和点击命中（见 main.swift）
     private let seedCount: Int?
@@ -565,6 +568,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.flashStatus("设置已保存 ✓")
             AppDebug.log("[settings] 已保存（key \(cfg.resolvedAPIKey.isEmpty ? "缺" : "有")，模型 \(cfg.model)）")
+        }
+
+        // --seed 是界面自检，不启动更新器（免得测试时弹更新窗）
+        if seedCount == nil {
+            updaterController = SPUStandardUpdaterController(startingUpdater: true,
+                                                             updaterDelegate: nil,
+                                                             userDriverDelegate: nil)
         }
 
         installHiddenMainMenu()
@@ -648,6 +658,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appMenu.addItem(withTitle: "关于耳录",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
+        if let check = makeCheckForUpdatesItem() {
+            appMenu.addItem(check)
+        }
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "隐藏耳录", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
@@ -743,6 +756,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(makeToggle("声音提醒", prefs.notifySound, #selector(toggleSound)))
         menu.addItem(makeItem("设置…", #selector(openSettingsItem), ","))
+        if let check = makeCheckForUpdatesItem() {
+            menu.addItem(check)
+        }
         menu.addItem(makeItem("打开配置文件", #selector(openConfig), ""))
         menu.addItem(makeItem("重新加载配置", #selector(reloadConfig), ""))
         menu.addItem(.separator())
@@ -779,6 +795,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
         it.target = self
         it.state = on ? .on : .off
+        return it
+    }
+
+    /// target 必须是 Sparkle 的 controller：它自己负责检查中/不可用时的置灰
+    private func makeCheckForUpdatesItem() -> NSMenuItem? {
+        guard let updaterController else { return nil }
+        let it = NSMenuItem(title: "检查更新…",
+                            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                            keyEquivalent: "")
+        it.target = updaterController
         return it
     }
 

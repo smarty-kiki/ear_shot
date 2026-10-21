@@ -13,6 +13,7 @@
 #                       免得打包动作踩本机正在验收/授权的那个 dist/EarShot.app）
 #   CODESIGN_IDENTITY   签名身份（默认 "-" ad-hoc；换固定证书可让
 #                       音频采集授权跨重建保持）
+#   SPARKLE_DIR         Sparkle 2.10.0 解压目录（默认自动下载到 .sparkle/）
 #
 set -euo pipefail
 
@@ -58,6 +59,8 @@ fi
 
 mkdir -p "$BUILD" "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 
+SPARKLE_DIR="$("$ROOT/scripts/fetch-sparkle.sh")"
+
 SDK="$(xcrun --show-sdk-path)"
 HOST_ARCH="$(uname -m)"
 
@@ -69,6 +72,11 @@ COMMON_FLAGS=(
   -framework Speech            # SpeechAnalyzer / SpeechTranscriber
   -framework CoreAudio         # CATapDescription / 聚合设备（采集 + --taptest 探针）
   -framework CoreMedia
+  -F "$SPARKLE_DIR"
+  -framework Sparkle
+  # bundle 里的位置 / build/ 下裸二进制自检的位置
+  -Xlinker -rpath -Xlinker @executable_path/../Frameworks
+  -Xlinker -rpath -Xlinker @loader_path/Frameworks
   -Xfrontend -disable-sandbox      # 关掉编译器自带的 sandbox，避免中间产物写入被拦
 )
 if [ "$DEBUG" = "1" ]; then
@@ -100,6 +108,11 @@ fi
 echo "==> 组装 bundle"
 cp -f "$BUILD/$APP_NAME" "$BUNDLE/Contents/MacOS/$APP_NAME"
 cp -f "$ROOT/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
+# 必须在 codesign 之前；ditto 保住 framework 里的符号链接
+rm -rf "$BUNDLE/Contents/Frameworks/Sparkle.framework" "$BUILD/Frameworks/Sparkle.framework"
+mkdir -p "$BUNDLE/Contents/Frameworks" "$BUILD/Frameworks"
+ditto "$SPARKLE_DIR/Sparkle.framework" "$BUNDLE/Contents/Frameworks/Sparkle.framework"
+ditto "$SPARKLE_DIR/Sparkle.framework" "$BUILD/Frameworks/Sparkle.framework"
 if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
   cp -f "$ROOT/Resources/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
 fi
