@@ -683,6 +683,7 @@ struct PanelBody: View {
             Text("耳录")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
+                .fixedSize()
             // 两条声纹：前面是图标（麦克风 = 我，喇叭 = 电脑自己），后面跟一串
             // 电平柱。中间那行实时转写文字拿掉之后，「它在听、现在有动静」
             // 就靠它们表达 —— 不用读字，扫一眼就知道哪路在说话
@@ -691,15 +692,6 @@ struct PanelBody: View {
             // 大脑 + 数字：这次打开以来大模型回包一共烧了多少 token。
             // 有回包就涨 —— 「它在花钱」扫一眼可见，不用翻日志
             TokenBadge(tokens: store.totalTokens)
-            if !store.todos.isEmpty {
-                CountChip(text: "\(store.todos.count) 条待办",
-                          color: Color(white: 0.72))
-            }
-            if store.newCount > 0 {
-                // 「未读」= 新来的 + 被补全/修改过的（见 TodoStore.merge）——
-                // 说「条新」会名不副实，改口叫未读
-                CountChip(text: "\(store.newCount) 条未读", color: AlertLevel.new.color)
-            }
             Spacer(minLength: 6)
             // 右侧状态：监听计时 / 报错原因 / 模型下载进度。绝不静默失败。
             if !store.statusText.isEmpty {
@@ -709,6 +701,7 @@ struct PanelBody: View {
                                      ? Color(red: 1.0, green: 0.62, blue: 0.04)
                                      : Color(white: 0.4))
                     .lineLimit(1)
+                    .truncationMode(.tail)
             }
             // 收起用的着力点。点标题栏任何地方都能收起，这个只是让人看得见。
             Image(systemName: "chevron.down")
@@ -774,19 +767,6 @@ struct PanelBody: View {
     }
 }
 
-private struct CountChip: View {
-    var text: String
-    var color: Color
-    var body: some View {
-        Text(text)
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(color)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(color.opacity(0.16)))
-    }
-}
-
 /// 标题栏的一条「声纹」：来源图标 + 一串电平柱（`AudioMeters` 推来的 0…1）。
 ///
 /// 柱高对称着从中线长出去，越新的电平越靠右 —— 和录音软件里的波形一个读法。
@@ -840,8 +820,12 @@ private struct TokenBadge: View {
                 .font(.system(size: 8.5, weight: .semibold))
             Text(tokens.formatted(.number.notation(.compactName)))
                 .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                .lineLimit(1)
         }
         .foregroundStyle(Color.white.opacity(tokens > 0 ? 0.78 : 0.34))
+        // 不加 fixedSize 会被 HStack 压成两行；minWidth 给「1.9万」留余量
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minWidth: 46, alignment: .leading)
         .help("这次打开以来大模型共消耗 \(tokens) token")
     }
 }
